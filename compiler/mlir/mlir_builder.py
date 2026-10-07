@@ -260,10 +260,9 @@ class MLIRBuilder:
         right_type = self._memref_type(right)
         out_type = self._memref_type(output)
         return [
-            f"{indent}{result_name} = linalg.matmul "
+            f"{indent}linalg.matmul "
             f"ins({self._value_names[left.name]}, {self._value_names[right.name]} : "
             f"{left_type}, {right_type}) outs({result_name} : {out_type}) "
-            f"-> {out_type}"
         ]
 
     def _emit_linear_placeholder(
@@ -276,6 +275,7 @@ class MLIRBuilder:
         out_type = self._memref_type(output)
         dims = ", ".join(f"d{axis}" for axis in range(output.rank))
         identity = f"affine_map<({dims}) -> ({dims})>"
+        input_map = f"affine_map<({dims}) -> (d0, 0, 0, 0)>"
         iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
         return [
             f"{indent}// Linear op is lowered by mgpu-to-isa; "
@@ -301,6 +301,7 @@ class MLIRBuilder:
         out_type = self._memref_type(output)
         dims = ", ".join(f"d{axis}" for axis in range(output.rank))
         identity = f"affine_map<({dims}) -> ({dims})>"
+        input_map = f"affine_map<({dims}) -> (d0, 0, 0, 0)>"
         iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
 
         if node.op == Op.RELU:
@@ -379,6 +380,7 @@ class MLIRBuilder:
         out_type = self._memref_type(output)
         dims = ", ".join(f"d{axis}" for axis in range(output.rank))
         identity = f"affine_map<({dims}) -> ({dims})>"
+        input_map = f"affine_map<({dims}) -> (d0, 0, d2, d3)>"
         iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
         return [
             f"{indent}// Shape/layout op is lowered by mgpu-to-isa; "
@@ -430,14 +432,23 @@ class MLIRBuilder:
         image_type = self._memref_type(image)
         weight_type = self._memref_type(weight)
         out_type = self._memref_type(output)
+        scalar_type = self._scalar_type(output.dtype)
+        dims = ", ".join(f"d{axis}" for axis in range(output.rank))
+        identity = f"affine_map<({dims}) -> ({dims})>"
+        input_map = f"affine_map<({dims}) -> (d0, 0, 0, 0)>"
+        iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
 
         return [
-            f"{indent}{result_name} = linalg.conv_2d_nchw_fchw",
-            f"{indent}  dilations = {_dense_i64_2(dilations)}",
-            f"{indent}  strides = {_dense_i64_2(strides)}",
-            f"{indent}  ins({self._value_names[image.name]}, "
-            f"{self._value_names[weight.name]} : {image_type}, {weight_type}) "
-            f"outs({result_name} : {out_type}) -> {out_type}",
+            f"{indent}// Conv2d op is lowered by mgpu-to-isa; "
+            "linalg identity is a placeholder.",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{input_map}, {identity}],",
+            f"{indent}  iterator_types = [{iterator_types}]",
+            f"{indent}}} ins({self._value_names[image.name]} : {image_type}) "
+            f"outs({result_name} : {out_type}) {{",
+            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+            f"{indent}  linalg.yield %in : {scalar_type}",
+            f"{indent}}}",
         ]
 
     def _emit_depthwise_conv2d(

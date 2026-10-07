@@ -64,7 +64,7 @@ class TestONNXFrontend(unittest.TestCase):
         graph = ONNXFrontend("onnx_cnn").convert(model)
         graph.validate()
         mlir = MLIRBuilder().build(graph)
-        self.assertIn("linalg.conv_2d_nchw_fchw", mlir)
+        self.assertIn("linalg.generic", mlir)
 
         x = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
         result = run_operator_e2e(

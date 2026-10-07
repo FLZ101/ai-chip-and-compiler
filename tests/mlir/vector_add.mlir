@@ -1,4 +1,5 @@
 // RUN: %python %S/emit_graph.py --case vector_add | %filecheck %s
+// RUN: %python %S/emit_graph.py --case vector_add | %mgpu_opt - -o /dev/null
 // CHECK: module {
 // CHECK:   func.func @vector_add(%arg0: memref<8xf32>, %arg1: memref<8xf32>) -> memref<8xf32> {
 // CHECK:     %v0 = memref.alloc() : memref<8xf32>
