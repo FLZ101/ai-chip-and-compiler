@@ -491,6 +491,62 @@ Tests:
 - run several decode steps,
 - compare outputs.
 
+### 6.6 Real CNN target
+
+Target:
+
+- `MobileNetV3-Small` or `ResNet18`
+
+Steps:
+
+1. Export from PyTorch and ONNX.
+2. Freeze to static `1x3x224x224`.
+3. Import with `torch-mlir`.
+4. Add missing op/pass coverage discovered by the importer.
+5. Run `mgpu-opt` lowering.
+6. Execute in simulator.
+7. Compare output against PyTorch/ONNX Runtime.
+
+Tests:
+
+- `tests/model_e2e/test_real_cnn.py`
+
+### 6.7 Real small LLM target
+
+Target order:
+
+1. `Pythia-70M`
+2. `GPT-2-small`
+3. `TinyLlama` as stretch
+
+Steps:
+
+1. Export/trace a small decoder model.
+2. Staticize sequence length.
+3. Import with `torch-mlir`.
+4. Implement or complete general `Linear`, `LayerNorm`, `Softmax`,
+   attention, RoPE, and KV-cache lowering.
+5. Implement memory planning for model weights and KV-cache.
+6. Run a greedy decode loop.
+7. Compare generated token IDs with PyTorch.
+
+Tests:
+
+- `tests/model_e2e/test_real_llm_decode.py`
+
+---
+
+## Hardware scaling
+
+Before real models can run, extend the simulator configuration:
+
+- larger global memory,
+- more SMs,
+- multiple resident blocks per SM,
+- shared-memory size control,
+- register-file size control,
+- memory allocator for model weights, activations, and KV-cache.
+
 ---
 
 ## Phase 7: Runtime and Hardening

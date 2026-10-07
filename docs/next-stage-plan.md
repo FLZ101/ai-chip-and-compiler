@@ -321,7 +321,84 @@ Simulator work:
 
 ---
 
-## 8. Risks and mitigations
+## 8. Real CNN and LLM targets
+
+The plan is not complete without explicit real-model acceptance gates.
+
+### CNN target
+
+Primary target:
+
+- `MobileNetV3-Small` or `ResNet18`
+
+Input:
+
+```text
+1x3x224x224
+```
+
+Required path:
+
+```text
+PyTorch or ONNX export
+  -> torch-mlir import
+  -> mgpu-opt lowering
+  -> ISA
+  -> simulator
+  -> PyTorch/ONNX Runtime comparison
+```
+
+Acceptance:
+
+- predicted class or output tensor matches reference within documented
+  tolerance,
+- deterministic across repeated runs,
+- profiler reports plausible memory traffic and cycles.
+
+### LLM target
+
+Primary targets, in order:
+
+1. `Pythia-70M`
+2. `GPT-2-small`
+3. `TinyLlama` as stretch
+
+Input:
+
+```text
+tokenized prompt with static sequence length
+```
+
+Required path:
+
+```text
+tokenizer input
+  -> embedding/attention/FFN
+  -> greedy decode
+  -> KV-cache append/gather
+  -> generated token IDs
+```
+
+Acceptance:
+
+- generated token IDs match a PyTorch reference decode loop,
+- KV-cache decode is deterministic,
+- memory planner handles the model's KV-cache size.
+
+### Hardware sizing
+
+The simulator must be scaled from the current 1 MB / 4 SMs to support the
+chosen models. Add explicit knobs for:
+
+- global memory size,
+- SM count,
+- blocks per SM,
+- shared-memory size,
+- register file size.
+
+---
+
+## 9. Risks and mitigations
 
 | Risk | Mitigation |
 | --- | --- |
@@ -334,7 +411,7 @@ Simulator work:
 
 ---
 
-## 9. Definition of done
+## 10. Definition of done
 
 The stage is complete when:
 

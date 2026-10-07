@@ -539,6 +539,34 @@ Reference:
 
 ---
 
+## Real model milestone
+
+Status: **planned**
+
+Goal:
+
+- Run real exported CNN and small LLM decode loops through the full pipeline.
+
+Targets:
+
+- CNN: `MobileNetV3-Small` or `ResNet18`
+- LLM: `Pythia-70M`, then `GPT-2-small`, then `TinyLlama`
+
+Required:
+
+- real `mgpu-opt` lowering passes,
+- larger simulator memory and multi-block scheduling,
+- general linear/matmul lowering,
+- KV-cache memory planning,
+- real-model golden tests.
+
+Reference:
+
+- [next-stage-plan.md](next-stage-plan.md)
+- [next-stage-steps.md](next-stage-steps.md)
+
+---
+
 ## Future optional steps
 
 After the main path works:
