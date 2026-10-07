@@ -170,6 +170,8 @@ class MLIRBuilder:
             return self._emit_reduction(node, result_name, indent)
         if node.op == Op.MATMUL:
             return self._emit_matmul(node, result_name, indent)
+        if node.op == Op.LINEAR:
+            return self._emit_linear_placeholder(node, result_name, indent)
         if node.op == Op.CONV2D:
             return self._emit_conv2d(node, result_name, indent)
         if node.op == Op.DEPTHWISE_CONV2D:
@@ -270,6 +272,30 @@ class MLIRBuilder:
             f"ins({self._value_names[left.name]}, {self._value_names[right.name]} : "
             f"{left_type}, {right_type}) outs({result_name} : {out_type}) "
             f"-> {out_type}"
+        ]
+
+    def _emit_linear_placeholder(
+        self, node: Node, result_name: str, indent: str
+    ) -> list[str]:
+        value = node.inputs[0]
+        output = node.outputs[0]
+        scalar_type = self._scalar_type(output.dtype)
+        value_type = self._memref_type(value)
+        out_type = self._memref_type(output)
+        dims = ", ".join(f"d{axis}" for axis in range(output.rank))
+        identity = f"affine_map<({dims}) -> ({dims})>"
+        iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
+        return [
+            f"{indent}// Linear op is lowered by mgpu-to-isa; "
+            "linalg identity is a placeholder.",
+            f"{indent}{result_name} = linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {identity}]",
+            f"{indent}  iterator_types = [{iterator_types}]",
+            f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
+            f"outs({result_name} : {out_type}) {{",
+            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+            f"{indent}  linalg.yield %in : {scalar_type}",
+            f"{indent}}} -> {out_type}",
         ]
 
     def _emit_activation(self, node: Node, result_name: str, indent: str) -> list[str]:
@@ -405,8 +431,8 @@ class MLIRBuilder:
     def _emit_conv2d(self, node: Node, result_name: str, indent: str) -> list[str]:
         image, weight = node.inputs[:2]
         output = node.outputs[0]
-        padding = node.attrs.get("padding", 0)
-        if padding != 0:
+        padding = _pair(node.attrs.get("padding", 0), "padding")
+        if padding != (0, 0):
             raise MLIRBuilderError(
                 "MLIR conv2d lowering currently supports padding=0 only"
             )
@@ -431,8 +457,8 @@ class MLIRBuilder:
     ) -> list[str]:
         image, weight = node.inputs[:2]
         output = node.outputs[0]
-        padding = node.attrs.get("padding", 0)
-        if padding != 0:
+        padding = _pair(node.attrs.get("padding", 0), "padding")
+        if padding != (0, 0):
             raise MLIRBuilderError(
                 "MLIR depthwise conv lowering currently supports padding=0 only"
             )

@@ -408,6 +408,8 @@ Reference:
 
 ## Step 014: ONNX and PyTorch FX frontends
 
+Status: **done**
+
 Goal:
 
 - Import real exported models.
@@ -421,6 +423,10 @@ Exit criteria:
 
 - An exported CNN graph lowers through the same pipeline as the manual frontend.
 - A small PyTorch Transformer block exports and lowers.
+
+Reference:
+
+- [step-014.md](step-014.md)
 
 ---
 

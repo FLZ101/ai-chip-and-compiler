@@ -22,10 +22,10 @@ def lower_activation_kernel(
     node = graph.nodes[0]
     value = layout[node.inputs[0].name]
     output = layout[node.outputs[0].name]
-    if len(value.shape) != 1 or value.shape != output.shape:
-        raise NotImplementedError("activation lowering supports rank-1 tensors")
+    if value.shape != output.shape:
+        raise NotImplementedError("activation lowering requires equal shapes")
 
-    n = value.shape[0]
+    n = value.numel
     block_size = 32
     grid_x = math.ceil(n / block_size)
     output_delta = output.base_addr - value.base_addr

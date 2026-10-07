@@ -68,7 +68,8 @@ def _conv2d_isa(
         raise NotImplementedError("conv2d lowering supports batch size 1")
     if int(node.attrs.get("groups", 1)) != 1:
         raise NotImplementedError("conv2d lowering supports groups=1")
-    if int(node.attrs.get("dilation", 1)) != 1:
+    dilation = _pair(node.attrs.get("dilation", 1), "dilation")
+    if dilation != (1, 1):
         raise NotImplementedError("conv2d lowering supports dilation=1")
 
     n, c, h, w = image.shape

@@ -7,14 +7,16 @@ and Step 005 (unified Model IR and manual frontend) and Step 006 (MLIR builder
 and `mgpu` dialect) and Step 007 (shared operator E2E harness), Step 008
 (common kernels), Step 009 (activation and shape/layout kernels), Step 010
 (CNN kernels), Step 011 (CNN normalization and detection helpers), Step 012
-(Transformer normalization and softmax), and Step 013 (attention, RoPE, and
-KV-cache) are now also implemented.
+(Transformer normalization and softmax), Step 013 (attention, RoPE, and
+KV-cache), and Step 014 (ONNX and PyTorch FX frontends) are now also
+implemented.
 They are described in [step-002.md](step-002.md), [step-003.md](step-003.md),
 [step-004.md](step-004.md), [step-005.md](step-005.md), and
 [step-006.md](step-006.md), [step-007.md](step-007.md), and
 [step-008.md](step-008.md), [step-009.md](step-009.md),
 [step-010.md](step-010.md), [step-011.md](step-011.md), and
-[step-012.md](step-012.md), and [step-013.md](step-013.md).
+[step-012.md](step-012.md), [step-013.md](step-013.md), and
+[step-014.md](step-014.md).
 
 The first milestone is intentionally narrow: prove that we can parse a small GPU ISA, model global/shared memory, execute a simple SIMT warp, and run an end-to-end vector-add program against a deterministic simulator.
 
@@ -209,5 +211,5 @@ Expected result: all current tests pass.
 
 ## 7. Next step
 
-The next step is to add ONNX and PyTorch FX frontends.  This is described as
-Step 014 in [steps.md](steps.md).
+The next step is to add a runtime and driver layer.  This is described as
+Step 015 in [steps.md](steps.md).
