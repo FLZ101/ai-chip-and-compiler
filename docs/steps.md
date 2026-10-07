@@ -145,6 +145,8 @@ Reference:
 
 ## Step 005: Unified Model IR and manual frontend
 
+Status: **done**
+
 Goal:
 
 - Define a language-neutral model graph for CNN and Transformer ops.
@@ -168,6 +170,10 @@ Op nodes must include:
 Exit criteria:
 
 - A manual graph can be built, printed, and validated.
+
+Reference:
+
+- [step-005.md](step-005.md)
 
 ---
 
