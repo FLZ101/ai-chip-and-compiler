@@ -537,6 +537,10 @@ def _alu(
         if b is None or c is None:
             raise ValueError("FMA requires two source operands")
         return a * b + c
+    if op == "MMA":
+        if b is None or c is None:
+            raise ValueError("MMA requires two source operands")
+        return a * b + c
     if b is None:
         raise ValueError(f"{op} requires a source operand")
     if op == "ADD":
@@ -816,6 +820,7 @@ def execute_warp(
             "MAX",
             "MIN",
             "FMA",
+            "MMA",
             "MOV",
             "NEG",
             "ABS",
@@ -831,6 +836,15 @@ def execute_warp(
                 if len(instruction.srcs) != 3:
                     raise ValueError(
                         "FMA expects three source operands after destination"
+                    )
+                a = _read_operand(device, sm, warp, lane, instruction.srcs[0])
+                b = _read_operand(device, sm, warp, lane, instruction.srcs[1])
+                c = _read_operand(device, sm, warp, lane, instruction.srcs[2])
+                value = _alu(op, a, b, c)
+            elif op == "MMA":
+                if len(instruction.srcs) != 3:
+                    raise ValueError(
+                        "MMA expects three source operands after destination"
                     )
                 a = _read_operand(device, sm, warp, lane, instruction.srcs[0])
                 b = _read_operand(device, sm, warp, lane, instruction.srcs[1])

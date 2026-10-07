@@ -39,6 +39,15 @@ class TestIsaParser(unittest.TestCase):
             [instr.op for instr in program], ["RCP", "RSQRT", "EXP2", "LOG2", "FMA"]
         )
 
+    def test_parse_mma(self):
+        program = parse_asm("MMA R0, R1, R2, R3")
+        self.assertEqual(program[0].op, "MMA")
+        self.assertEqual(program[0].dst, Reg("R0"))
+        self.assertEqual(
+            program[0].srcs,
+            (Reg("R1"), Reg("R2"), Reg("R3")),
+        )
+
     def test_parse_integer_division(self):
         program = parse_asm("IDIV R1, R2, R3")
         self.assertEqual(program[0].op, "IDIV")

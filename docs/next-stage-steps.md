@@ -396,6 +396,10 @@ Tests:
 
 ### 4.1 Execute `MMA` in the simulator
 
+Status: **done**
+
+Reference: [step-4.1.md](step-4.1.md)
+
 Implement functional matrix multiply-accumulate.
 
 Supported:

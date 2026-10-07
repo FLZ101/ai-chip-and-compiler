@@ -42,6 +42,9 @@ REGISTER_DEST_OPS = {
     "IDIV",
     # Fused multiply-add: dst = a * b + c.
     "FMA",
+    # Tensor-core-style matrix multiply-accumulate.  The MVP models one
+    # fragment element as dst = a * b + c.
+    "MMA",
     # Unary ALU operations.
     "NEG",
     "ABS",

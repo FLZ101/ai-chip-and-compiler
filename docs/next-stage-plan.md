@@ -58,10 +58,10 @@ The plan explicitly includes:
 - The simulator is functional and deterministic for FP32.
 - The Model IR, manual frontend, MLIR text builder, runtime, and per-op ISA
   lowerings already exist.
-- Phases 2.1 through 3.6 are complete: real PyTorch FX and ONNX models import
+- Phases 2.1 through 4.1 are complete: real PyTorch FX and ONNX models import
   with `torch-mlir`, canonicalize to `linalg-on-tensors` or `tosa`, lower the
   core CNN/Transformer ops to `linalg`, pass through the C++ target passes,
-  and emit simulator ISA for E2E validation.
+  emit simulator ISA, and execute functional `MMA` in the simulator.
 - The current MLIR builder emits text but does not parse or run passes.
 - The `mgpu` dialect exists only as TableGen/ODS text.
 - Simulator `MMA` is reserved but not executed.
