@@ -181,6 +181,13 @@ class MLIRBuilder:
         }:
             return self._emit_pooling_placeholder(node, result_name, indent)
         if node.op in {
+            Op.BATCH_NORM,
+            Op.GROUP_NORM,
+            Op.BOX_DECODE,
+            Op.NMS,
+        }:
+            return self._emit_norm_detection_placeholder(node, result_name, indent)
+        if node.op in {
             Op.RELU,
             Op.LEAKY_RELU,
             Op.SILU,
@@ -441,6 +448,30 @@ class MLIRBuilder:
         iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
         return [
             f"{indent}// Pooling op is lowered by mgpu-to-isa; "
+            "linalg identity is a placeholder.",
+            f"{indent}{result_name} = linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {identity}]",
+            f"{indent}  iterator_types = [{iterator_types}]",
+            f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
+            f"outs({result_name} : {out_type}) {{",
+            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+            f"{indent}  linalg.yield %in : {scalar_type}",
+            f"{indent}}} -> {out_type}",
+        ]
+
+    def _emit_norm_detection_placeholder(
+        self, node: Node, result_name: str, indent: str
+    ) -> list[str]:
+        value = node.inputs[0]
+        output = node.outputs[0]
+        scalar_type = self._scalar_type(output.dtype)
+        value_type = self._memref_type(value)
+        out_type = self._memref_type(output)
+        dims = ", ".join(f"d{axis}" for axis in range(output.rank))
+        identity = f"affine_map<({dims}) -> ({dims})>"
+        iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
+        return [
+            f"{indent}// Normalization/detection op is lowered by mgpu-to-isa; "
             "linalg identity is a placeholder.",
             f"{indent}{result_name} = linalg.generic {{",
             f"{indent}  indexing_maps = [{identity}, {identity}]",

@@ -8,6 +8,7 @@ from ..model_ir import Graph, Op
 from .activation_kernels import lower_activation_kernel
 from .cnn_kernels import lower_cnn_kernel
 from .common_kernels import lower_common_kernel
+from .norm_detection_kernels import lower_norm_detection_kernel
 from .shape_kernels import lower_shape_kernel
 
 
@@ -46,4 +47,11 @@ def lower_kernel(
         Op.GLOBAL_AVG_POOL,
     }:
         return lower_cnn_kernel(graph, mlir_text, layout)
+    if node.op in {
+        Op.BATCH_NORM,
+        Op.GROUP_NORM,
+        Op.BOX_DECODE,
+        Op.NMS,
+    }:
+        return lower_norm_detection_kernel(graph, mlir_text, layout)
     return lower_common_kernel(graph, mlir_text, layout)

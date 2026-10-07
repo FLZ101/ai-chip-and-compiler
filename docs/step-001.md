@@ -5,13 +5,14 @@ Step 002 (branches, divergence, and reconvergence) and Step 003 (block barriers
 and multi-warp scheduling), and Step 004 (timing model and performance counters)
 and Step 005 (unified Model IR and manual frontend) and Step 006 (MLIR builder
 and `mgpu` dialect) and Step 007 (shared operator E2E harness), Step 008
-(common kernels), Step 009 (activation and shape/layout kernels), and Step 010
-(CNN kernels) are now also implemented.
+(common kernels), Step 009 (activation and shape/layout kernels), Step 010
+(CNN kernels), and Step 011 (CNN normalization and detection helpers) are now
+also implemented.
 They are described in [step-002.md](step-002.md), [step-003.md](step-003.md),
 [step-004.md](step-004.md), [step-005.md](step-005.md), and
 [step-006.md](step-006.md), [step-007.md](step-007.md), and
-[step-008.md](step-008.md), [step-009.md](step-009.md), and
-[step-010.md](step-010.md).
+[step-008.md](step-008.md), [step-009.md](step-009.md),
+[step-010.md](step-010.md), and [step-011.md](step-011.md).
 
 The first milestone is intentionally narrow: prove that we can parse a small GPU ISA, model global/shared memory, execute a simple SIMT warp, and run an end-to-end vector-add program against a deterministic simulator.
 
@@ -206,5 +207,5 @@ Expected result: all current tests pass.
 
 ## 7. Next step
 
-The next step is to add CNN normalization and detection helpers.  This is
-described as Step 011 in [steps.md](steps.md).
+The next step is to add Transformer normalization and softmax primitives.  This
+is described as Step 012 in [steps.md](steps.md).

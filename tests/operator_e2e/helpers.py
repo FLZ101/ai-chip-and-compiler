@@ -135,20 +135,45 @@ def run_operator_e2e(
             f"got {sorted(inputs)}"
         )
 
-    output_tensors = {
-        value.name: np.zeros(value.shape, dtype=np.float32) for value in graph.outputs
+    intermediate_tensors = {
+        value.name: np.zeros(value.shape, dtype=np.float32)
+        for node in graph.nodes
+        for value in node.outputs
     }
-    layout = allocate_global_buffers(device, {**inputs, **output_tensors})
+    layout = allocate_global_buffers(device, {**inputs, **intermediate_tensors})
 
-    isa_text, (grid_dim, block_dim) = lowering(graph, mlir_text, layout)
-    program = parse_asm(isa_text)
-    profile_snapshot = launch(
-        device,
-        program,
-        grid_dim=grid_dim,
-        block_dim=block_dim,
-        profile=profile,
-    )
+    if len(graph.nodes) == 1:
+        isa_text, (grid_dim, block_dim) = lowering(graph, mlir_text, layout)
+        program = parse_asm(isa_text)
+        profile_snapshot = launch(
+            device,
+            program,
+            grid_dim=grid_dim,
+            block_dim=block_dim,
+            profile=profile,
+        )
+    else:
+        isa_parts: list[str] = []
+        profile_snapshot = None
+        for node in graph.nodes:
+            subgraph = Graph(
+                name=node.name,
+                inputs=list(node.inputs),
+                outputs=list(node.outputs),
+                nodes=[node],
+            )
+            subgraph.validate()
+            node_isa, (grid_dim, block_dim) = lowering(subgraph, mlir_text, layout)
+            isa_parts.append(node_isa)
+            program = parse_asm(node_isa)
+            profile_snapshot = launch(
+                device,
+                program,
+                grid_dim=grid_dim,
+                block_dim=block_dim,
+                profile=profile,
+            )
+        isa_text = "\n\n".join(isa_parts)
 
     outputs = [read_tensor(device, layout[value.name]) for value in graph.outputs]
     if expected is not None:

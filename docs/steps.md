@@ -328,6 +328,8 @@ Reference:
 
 ## Step 011: CNN normalization and detection helpers
 
+Status: **done**
+
 Goal:
 
 - Support full CNN/object-detection graphs.
@@ -342,6 +344,10 @@ Kernels:
 Exit criteria:
 
 - A small detector-head graph compiles and runs.
+
+Reference:
+
+- [step-011.md](step-011.md)
 
 ---
 
