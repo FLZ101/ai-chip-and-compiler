@@ -211,6 +211,8 @@ Reference:
 
 ## Step 007: Shared operator E2E harness
 
+Status: **done**
+
 Goal:
 
 - Create one reusable end-to-end test pipeline.
@@ -228,6 +230,10 @@ model graph -> MLIR -> ISA -> simulator -> output
 Exit criteria:
 
 - Every new operator test uses the same harness.
+
+Reference:
+
+- [step-007.md](step-007.md)
 
 ---
 
