@@ -7,7 +7,7 @@ SETUP_STAMP := $(VENV)/.make-setup
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup unit lit test pytest format precommit clean clean-venv
+.PHONY: help setup unit lit test pytest format precommit mgpu-opt clean clean-venv
 
 help:
 	@printf "Targets:\n"
@@ -18,6 +18,7 @@ help:
 	@printf "  make pytest       Run pytest suite\n"
 	@printf "  make format       Format Python code with black\n"
 	@printf "  make precommit    Run all pre-commit hooks\n"
+	@printf "  make mgpu-opt     Download/build MLIR and out-of-tree mgpu-opt\n"
 	@printf "  make clean        Remove generated caches/test artifacts\n"
 	@printf "  make clean-venv   Remove .venv\n"
 
@@ -46,6 +47,9 @@ format: setup
 
 precommit: setup
 	$(BIN)/pre-commit run --all-files
+
+mgpu-opt:
+	./scripts/build_mlir.sh
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

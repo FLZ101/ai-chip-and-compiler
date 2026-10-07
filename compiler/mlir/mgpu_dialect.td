@@ -11,6 +11,7 @@
 #define MGPU_DIALECT
 
 include "mlir/IR/OpBase.td"
+include "mlir/IR/EnumAttr.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def MGPU_Dialect : Dialect {
@@ -19,16 +20,35 @@ def MGPU_Dialect : Dialect {
   let cppNamespace = "::mlir::mgpu";
 }
 
+def MGPU_Dimension : I32EnumAttr<"Dimension",
+  "Thread/block dimension component", [
+  I32EnumAttrCase<"X", 0, "x">,
+  I32EnumAttrCase<"Y", 1, "y">,
+  I32EnumAttrCase<"Z", 2, "z">
+]> {
+  let cppNamespace = "::mlir::mgpu";
+}
+
+def MGPU_DimensionAttr : EnumAttr<MGPU_Dialect, MGPU_Dimension, "dimension"> {
+  let assemblyFormat = "$value";
+}
+
 class MGPU_Op<string mnemonic, list<Trait> traits = []>
     : Op<MGPU_Dialect, mnemonic, traits>;
 
 def MGPU_LaunchOp : MGPU_Op<"launch", [NoMemoryEffect]> {
   let summary = "Launch one thread block";
-  let arguments = (ins Variadic<Index>:$blockSizes,
-                       Variadic<Index>:$threadSizes);
+  let arguments = (ins Index:$blockSizeX,
+                       Index:$blockSizeY,
+                       Index:$blockSizeZ,
+                       Index:$threadSizeX,
+                       Index:$threadSizeY,
+                       Index:$threadSizeZ);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = [{
-    `blocks` `(` $blockSizes `)` `threads` `(` $threadSizes `)`
+    attr-dict
+    `blocks` `(` $blockSizeX `,` $blockSizeY `,` $blockSizeZ `)`
+    `threads` `(` $threadSizeX `,` $threadSizeY `,` $threadSizeZ `)`
     $body
   }];
 }
@@ -93,10 +113,6 @@ def MGPU_MmaOp : MGPU_Op<"mma", [Pure]> {
 def MGPU_ReturnOp : MGPU_Op<"return", [Terminator]> {
   let summary = "Terminator for an mgpu.launch region";
   let assemblyFormat = "attr-dict";
-}
-
-def MGPU_DimensionAttr : EnumAttr<MGPU_Dialect, "x,y,z", "dimension"> {
-  let summary = "Thread/block dimension component";
 }
 
 #endif // MGPU_DIALECT
