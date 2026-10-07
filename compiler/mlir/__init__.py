@@ -1,5 +1,6 @@
-"""MLIR text generation and pass definitions for the minimal GPU target."""
+"""MLIR text generation, import, and pass definitions for the minimal GPU target."""
 
+from .importer import TorchMLIRImportError, TorchMLIRImporter, TorchMLIRImportResult
 from .mlir_builder import MLIRBuilder, MLIRBuilderError
 from .passes import DEFAULT_PASS_PIPELINE, Pass, PassPipeline
 
@@ -9,4 +10,7 @@ __all__ = [
     "MLIRBuilderError",
     "Pass",
     "PassPipeline",
+    "TorchMLIRImportError",
+    "TorchMLIRImporter",
+    "TorchMLIRImportResult",
 ]

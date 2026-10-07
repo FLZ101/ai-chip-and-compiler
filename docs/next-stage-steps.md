@@ -200,6 +200,10 @@ Done when:
 
 ### 2.1 Import PyTorch FX with torch-mlir
 
+Status: **done**
+
+Reference: [step-2.1.md](step-2.1.md)
+
 Implement:
 
 - replace manual FX converter with `torch_mlir` import,

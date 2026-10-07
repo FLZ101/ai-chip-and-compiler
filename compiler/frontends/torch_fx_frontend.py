@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from ..model_ir import DType, Graph
+from ..mlir.importer import TorchMLIRImporter, TorchMLIRImportResult
 from .manual_frontend import ManualFrontend
 
 
@@ -58,6 +59,44 @@ class TorchFXFrontend:
                 raise TorchFXFrontendError(f"unsupported FX node op: {node.op}")
 
         return frontend.build()
+
+    def import_mlir(
+        self,
+        module: torch.nn.Module,
+        *example_args: Any,
+        example_kwargs: dict[str, Any] | None = None,
+        func_name: str | None = None,
+        dynamic_shapes: dict[str, Any] | tuple[Any, ...] | None = None,
+        strict: bool = False,
+    ) -> TorchMLIRImportResult:
+        """Import a real PyTorch module through the ``torch-mlir`` FX path.
+
+        This is the Phase 2.1 entry point.  It keeps the legacy manual
+        :meth:`convert` path for simulator E2E tests while making the
+        production MLIR import available alongside it.  If no example inputs
+        are supplied, a single input declared in ``input_shapes`` is used.
+        """
+        if not example_args and not example_kwargs and self.input_shapes:
+            example_args = self._example_args_from_single_shape()
+
+        importer = TorchMLIRImporter()
+        return importer.import_module(
+            module,
+            *example_args,
+            example_kwargs=example_kwargs,
+            func_name=func_name or self.name,
+            dynamic_shapes=dynamic_shapes,
+            strict=strict,
+        )
+
+    def _example_args_from_single_shape(self) -> tuple[torch.Tensor, ...]:
+        if len(self.input_shapes) != 1:
+            raise TorchFXFrontendError(
+                "torch-mlir import with multiple inputs requires explicit example_args"
+            )
+        ((_, (shape, dtype)),) = self.input_shapes.items()
+        torch_dtype = _dtype_to_torch(DType(dtype))
+        return (torch.zeros(tuple(shape), dtype=torch_dtype),)
 
     def _placeholder_spec(self, name: str) -> tuple[tuple[int, ...], DType]:
         if name not in self.input_shapes:
@@ -209,3 +248,23 @@ class TorchFXFrontend:
     ) -> object:
         value = tensor.detach().cpu()
         return frontend.add_input(name, self._tensor_dtype(value), tuple(value.shape))
+
+
+def _dtype_to_torch(dtype: DType) -> torch.dtype:
+    """Map the small compiler dtype enum to a PyTorch dtype."""
+    mapping = {
+        DType.F32: torch.float32,
+        DType.F16: torch.float16,
+        DType.BF16: torch.bfloat16,
+        DType.I32: torch.int32,
+        DType.I64: torch.int64,
+        DType.I8: torch.int8,
+        DType.U8: torch.uint8,
+        DType.BOOL: torch.bool,
+    }
+    try:
+        return mapping[dtype]
+    except KeyError as exc:
+        raise TorchFXFrontendError(
+            f"cannot synthesize example tensor for dtype {dtype.value!r}"
+        ) from exc

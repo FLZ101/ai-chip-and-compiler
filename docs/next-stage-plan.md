@@ -58,6 +58,8 @@ The plan explicitly includes:
 - The simulator is functional and deterministic for FP32.
 - The Model IR, manual frontend, MLIR text builder, runtime, and per-op ISA
   lowerings already exist.
+- Phase 2.1 is complete: real PyTorch FX programs can be imported with
+  `torch-mlir` into parsed MLIR while preserving parameter/buffer names.
 - The current MLIR builder emits text but does not parse or run passes.
 - The `mgpu` dialect exists only as TableGen/ODS text.
 - Simulator `MMA` is reserved but not executed.
