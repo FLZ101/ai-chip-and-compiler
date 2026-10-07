@@ -4,16 +4,30 @@ Minimal GPU simulator and MLIR-based compiler targeting ordinary CNN/object-dete
 
 The project is under active development. Current status:
 
-- Minimal ISA parser/printer in `hw/isa.py`
-- Byte-addressable memory model in `hw/memory.py`
-- SIMT core and device launcher in `hw/core.py`
-- Initial ISA and vector-add tests in `tests/`
+- Minimal SIMT GPU simulator in `hw/`
+- Unified Model IR in `compiler/model_ir.py`
+- Manual CNN/Transformer graph frontend in `compiler/frontends/`
+- MLIR text builder and `mgpu` dialect in `compiler/mlir/`
+- Unit, operator end-to-end, and MLIR lit tests in `tests/`
 
 ## Setup
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[dev]'
-python -m unittest discover -v
+make setup
 ```
+
+Run all test cases:
+
+```bash
+make test
+```
+
+Run individual suites:
+
+```bash
+make unit
+make lit
+make pytest
+```
+
+Run `make help` for formatting, pre-commit, and cleanup targets.
