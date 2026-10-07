@@ -75,6 +75,8 @@ def allocate_global_buffers(
 
         data = np.asarray(array, dtype=np.float32)
         base_addr = cursor
+        if base_addr + data.nbytes > len(device.global_memory.data):
+            raise ValueError(f"global memory exhausted while placing tensor {name!r}")
         device.global_memory.load_floats(base_addr, data.reshape(-1).tolist())
         layout[name] = TensorBuffer(
             name=name,
@@ -134,6 +136,14 @@ def run_operator_e2e(
             f"inputs must match graph inputs: expected {sorted(input_names)}, "
             f"got {sorted(inputs)}"
         )
+
+    for value in graph.inputs:
+        array = np.asarray(inputs[value.name])
+        if tuple(array.shape) != value.shape:
+            raise ValueError(
+                f"input {value.name!r} has shape {array.shape}, "
+                f"expected {value.shape}"
+            )
 
     intermediate_tensors = {
         value.name: np.zeros(value.shape, dtype=np.float32)

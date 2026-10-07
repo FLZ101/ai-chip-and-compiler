@@ -56,17 +56,23 @@ class Driver:
         if name in self._buffers:
             raise DriverError(f"buffer {name!r} already exists")
 
+        shape_tuple = tuple(shape)
+        numel = 1
+        for dim in shape_tuple:
+            if dim < 0:
+                raise DriverError(f"invalid buffer shape: {shape_tuple!r}")
+            numel *= dim
+        if self._cursor + numel * 4 > len(self.device.global_memory.data):
+            raise DriverError("out of simulated global memory")
+
         buffer = Buffer(
             self.device,
             name=name,
             base_addr=self._cursor,
-            shape=tuple(shape),
+            shape=shape_tuple,
         )
         self._buffers[name] = buffer
         self._cursor = buffer.base_addr + buffer.nbytes
-
-        if buffer.base_addr + buffer.nbytes > len(self.device.global_memory.data):
-            raise DriverError("out of simulated global memory")
 
         buffer.write(np.zeros(buffer.shape, dtype=np.float32))
         return buffer

@@ -514,6 +514,8 @@ Reference:
 
 ## Step 018: Hardening and documentation
 
+Status: **done**
+
 Goal:
 
 - Make the project reliable and maintainable.
@@ -530,6 +532,10 @@ Tasks:
 Exit criteria:
 
 - `pre-commit`, unit tests, operator E2E tests, and model E2E tests all pass.
+
+Reference:
+
+- [step-018.md](step-018.md)
 
 ---
 

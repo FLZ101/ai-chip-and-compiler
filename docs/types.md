@@ -8,7 +8,10 @@ This document describes the tensor element types used by ONNX, with emphasis on 
 - emerging microscaling/float4 formats,
 - how these types map to our simulator and compiler.
 
-The MVP simulator currently executes FP32. This document defines the type model the frontend and compiler will consume from ONNX before lowering to the GPU ISA.
+The MVP simulator currently executes FP32. The unified Model IR already
+represents FP16/BF16/FP8/INT4/INT8 as metadata, but the ISA code generator and
+runtime only execute FP32. This document defines the type model the frontend and
+compiler will consume from ONNX before lowering to the GPU ISA.
 
 ---
 
