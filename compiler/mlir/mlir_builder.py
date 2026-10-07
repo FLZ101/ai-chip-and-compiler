@@ -173,7 +173,7 @@ class MLIRBuilder:
             Op.AVG_POOL2D,
             Op.GLOBAL_AVG_POOL,
         }:
-            return self._emit_pooling_placeholder(node, result_name, indent)
+            return self._emit_pooling(node, result_name, indent)
         if node.op in {
             Op.BATCH_NORM,
             Op.GROUP_NORM,
@@ -181,21 +181,24 @@ class MLIRBuilder:
             Op.NMS,
         }:
             return self._emit_norm_detection_placeholder(node, result_name, indent)
-        if node.op in {
-            Op.SOFTMAX,
-            Op.LAYER_NORM,
-            Op.RMS_NORM,
-        }:
-            return self._emit_transformer_placeholder(node, result_name, indent)
+        if node.op == Op.SOFTMAX:
+            return self._emit_softmax(node, result_name, indent)
+        if node.op == Op.LAYER_NORM:
+            return self._emit_layer_norm(node, result_name, indent)
+        if node.op == Op.RMS_NORM:
+            return self._emit_rms_norm(node, result_name, indent)
         if node.op in {
             Op.ROPE,
             Op.CAUSAL_MASK,
-            Op.SCALED_DOT_PRODUCT_ATTENTION,
-            Op.MASKED_ATTENTION,
             Op.KV_CACHE_APPEND,
             Op.KV_CACHE_GATHER,
         }:
             return self._emit_attention_placeholder(node, result_name, indent)
+        if node.op in {
+            Op.SCALED_DOT_PRODUCT_ATTENTION,
+            Op.MASKED_ATTENTION,
+        }:
+            return self._emit_attention(node, result_name, indent)
         if node.op in {
             Op.RELU,
             Op.LEAKY_RELU,
@@ -426,29 +429,37 @@ class MLIRBuilder:
         image, weight = node.inputs[:2]
         output = node.outputs[0]
         padding = _pair(node.attrs.get("padding", 0), "padding")
-
         strides = _pair(node.attrs.get("strides", 1), "strides")
         dilations = _pair(node.attrs.get("dilation", 1), "dilation")
         image_type = self._memref_type(image)
         weight_type = self._memref_type(weight)
         out_type = self._memref_type(output)
-        scalar_type = self._scalar_type(output.dtype)
-        dims = ", ".join(f"d{axis}" for axis in range(output.rank))
-        identity = f"affine_map<({dims}) -> ({dims})>"
-        input_map = f"affine_map<({dims}) -> (d0, 0, 0, 0)>"
-        iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
+        if padding != (0, 0):
+            scalar_type = self._scalar_type(output.dtype)
+            dims = ", ".join(f"d{axis}" for axis in range(output.rank))
+            input_map = f"affine_map<({dims}) -> (d0, 0, 0, 0)>"
+            identity = f"affine_map<({dims}) -> ({dims})>"
+            iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
+            return [
+                f"{indent}// Conv padding is inserted by the tiling pass; "
+                "identity placeholder preserves the legacy E2E path.",
+                f"{indent}linalg.generic {{",
+                f"{indent}  indexing_maps = [{input_map}, {identity}],",
+                f"{indent}  iterator_types = [{iterator_types}]",
+                f"{indent}}} ins({self._value_names[image.name]} : "
+                f"{image_type}) outs({result_name} : {out_type}) {{",
+                f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+                f"{indent}  linalg.yield %in : {scalar_type}",
+                f"{indent}}}",
+            ]
 
         return [
-            f"{indent}// Conv2d op is lowered by mgpu-to-isa; "
-            "linalg identity is a placeholder.",
-            f"{indent}linalg.generic {{",
-            f"{indent}  indexing_maps = [{input_map}, {identity}],",
-            f"{indent}  iterator_types = [{iterator_types}]",
-            f"{indent}}} ins({self._value_names[image.name]} : {image_type}) "
-            f"outs({result_name} : {out_type}) {{",
-            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
-            f"{indent}  linalg.yield %in : {scalar_type}",
-            f"{indent}}}",
+            f"{indent}linalg.conv_2d_nchw_fchw {{",
+            f"{indent}  dilations = {_dense_i64_2(dilations)},",
+            f"{indent}  strides = {_dense_i64_2(strides)}",
+            f"{indent}}} ins({self._value_names[image.name]}, "
+            f"{self._value_names[weight.name]} : {image_type}, {weight_type}) "
+            f"outs({result_name} : {out_type})",
         ]
 
     def _emit_depthwise_conv2d(
@@ -471,29 +482,81 @@ class MLIRBuilder:
             f"outs({result_name} : {out_type}) -> {out_type}",
         ]
 
-    def _emit_pooling_placeholder(
+    def _emit_pooling(self, node: Node, result_name: str, indent: str) -> list[str]:
+        value = node.inputs[0]
+        output = node.outputs[0]
+        value_type = self._memref_type(value)
+        out_type = self._memref_type(output)
+        kernel = _pair(node.attrs.get("kernel", 2), "kernel")
+        strides = _pair(node.attrs.get("strides", kernel), "strides")
+        if node.attrs.get("padding", 0) != 0:
+            raise MLIRBuilderError(
+                "linalg pooling lowering currently requires zero padding"
+            )
+
+        kernel_type = self._memref_type_for((kernel[0], kernel[1]), output.dtype)
+        kernel_name = f"%pool_kernel_{result_name.lstrip('%')}"
+        if node.op == Op.MAX_POOL2D:
+            op_name = "linalg.pooling_nchw_max"
+        elif node.op == Op.AVG_POOL2D:
+            op_name = "linalg.pooling_nchw_sum"
+        else:
+            return self._emit_global_avg_pool(node, result_name, indent)
+
+        return [
+            f"{indent}{kernel_name} = memref.alloc() : {kernel_type}",
+            f"{indent}{op_name} {{",
+            f"{indent}  dilations = dense<1> : tensor<2xi64>,",
+            f"{indent}  strides = {_dense_i64_2(strides)}",
+            f"{indent}}} ins({self._value_names[value.name]}, {kernel_name} : "
+            f"{value_type}, {kernel_type}) outs({result_name} : {out_type})",
+        ]
+
+    def _emit_global_avg_pool(
         self, node: Node, result_name: str, indent: str
     ) -> list[str]:
         value = node.inputs[0]
         output = node.outputs[0]
+        if value.rank != 4 or output.shape[:2] != value.shape[:2]:
+            raise MLIRBuilderError("global_avg_pool expects rank-4 NCHW input")
         scalar_type = self._scalar_type(output.dtype)
         value_type = self._memref_type(value)
         out_type = self._memref_type(output)
-        dims = ", ".join(f"d{axis}" for axis in range(output.rank))
-        identity = f"affine_map<({dims}) -> ({dims})>"
-        iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
-        return [
-            f"{indent}// Pooling op is lowered by mgpu-to-isa; "
-            "linalg identity is a placeholder.",
-            f"{indent}{result_name} = linalg.generic {{",
-            f"{indent}  indexing_maps = [{identity}, {identity}]",
+        suffix = result_name.lstrip("%")
+        sum_name = f"%gap_sum_{suffix}"
+        sum_type = self._memref_type_for(
+            (value.shape[0], value.shape[1], 1, 1), output.dtype
+        )
+        input_map = "affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>"
+        output_map = "affine_map<(d0, d1, d2, d3) -> (d0, d1, 0, 0)>"
+        iterator_types = '"parallel", "parallel", "reduction", "reduction"'
+        count = float(value.shape[2] * value.shape[3])
+        lines = [
+            f"{indent}{sum_name} = memref.alloc() : {sum_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{input_map}, {output_map}],",
             f"{indent}  iterator_types = [{iterator_types}]",
             f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
+            f"outs({sum_name} : {sum_type}) {{",
+            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+            f"{indent}  %sum = arith.addf %in, %out : {scalar_type}",
+            f"{indent}  linalg.yield %sum : {scalar_type}",
+            f"{indent}}}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [affine_map<(d0, d1, d2, d3) -> "
+            "(d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> "
+            "(d0, d1, d2, d3)>],",
+            f'{indent}  iterator_types = ["parallel", "parallel", '
+            '"parallel", "parallel"]',
+            f"{indent}}} ins({sum_name} : {sum_type}) "
             f"outs({result_name} : {out_type}) {{",
             f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
-            f"{indent}  linalg.yield %in : {scalar_type}",
-            f"{indent}}} -> {out_type}",
+            f"{indent}  %c = arith.constant {count!r} : {scalar_type}",
+            f"{indent}  %mean = arith.divf %in, %c : {scalar_type}",
+            f"{indent}  linalg.yield %mean : {scalar_type}",
+            f"{indent}}}",
         ]
+        return lines
 
     def _emit_norm_detection_placeholder(
         self, node: Node, result_name: str, indent: str
@@ -518,6 +581,382 @@ class MLIRBuilder:
             f"{indent}  linalg.yield %in : {scalar_type}",
             f"{indent}}} -> {out_type}",
         ]
+
+    def _emit_softmax(self, node: Node, result_name: str, indent: str) -> list[str]:
+        value = node.inputs[0]
+        output = node.outputs[0]
+        if value.rank != 2 or output.rank != 2:
+            raise MLIRBuilderError("linalg softmax lowering currently supports rank-2")
+        return self._emit_softmax_decomposition(
+            self._value_names[value.name],
+            self._memref_type(value),
+            result_name,
+            self._memref_type(output),
+            value.shape,
+            output.dtype,
+            result_name.lstrip("%"),
+            indent,
+        )
+
+    def _emit_softmax_decomposition(
+        self,
+        input_name: str,
+        input_type: str,
+        output_name: str,
+        output_type: str,
+        shape: tuple[int, int],
+        dtype: DType,
+        suffix: str,
+        indent: str,
+    ) -> list[str]:
+        n, d = shape
+        scalar = self._scalar_type(dtype)
+        row_type = self._memref_type_for((n,), dtype)
+        matrix_type = self._memref_type_for((n, d), dtype)
+        max_name = f"%softmax_max_{suffix}"
+        sub_name = f"%softmax_sub_{suffix}"
+        exp_name = f"%softmax_exp_{suffix}"
+        sum_name = f"%softmax_sum_{suffix}"
+        identity = "affine_map<(d0, d1) -> (d0, d1)>"
+        reduce = "affine_map<(d0, d1) -> (d0)>"
+
+        return [
+            f"{indent}{max_name} = memref.alloc() : {row_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {reduce}],",
+            f'{indent}  iterator_types = ["parallel", "reduction"]',
+            f"{indent}}} ins({input_name} : {input_type}) "
+            f"outs({max_name} : {row_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %max = arith.maximumf %in, %out : {scalar}",
+            f"{indent}  linalg.yield %max : {scalar}",
+            f"{indent}}}",
+            f"{indent}{sub_name} = memref.alloc() : {matrix_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {reduce}, {identity}],",
+            f'{indent}  iterator_types = ["parallel", "parallel"]',
+            f"{indent}}} ins({input_name}, {max_name} : {input_type}, {row_type}) "
+            f"outs({sub_name} : {matrix_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %max: {scalar}, %out: {scalar}):",
+            f"{indent}  %sub = arith.subf %in, %max : {scalar}",
+            f"{indent}  linalg.yield %sub : {scalar}",
+            f"{indent}}}",
+            f"{indent}{exp_name} = memref.alloc() : {matrix_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {identity}],",
+            f'{indent}  iterator_types = ["parallel", "parallel"]',
+            f"{indent}}} ins({sub_name} : {matrix_type}) "
+            f"outs({exp_name} : {matrix_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %exp = math.exp %in : {scalar}",
+            f"{indent}  linalg.yield %exp : {scalar}",
+            f"{indent}}}",
+            f"{indent}{sum_name} = memref.alloc() : {row_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {reduce}],",
+            f'{indent}  iterator_types = ["parallel", "reduction"]',
+            f"{indent}}} ins({exp_name} : {matrix_type}) "
+            f"outs({sum_name} : {row_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %sum = arith.addf %in, %out : {scalar}",
+            f"{indent}  linalg.yield %sum : {scalar}",
+            f"{indent}}}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {reduce}, {identity}],",
+            f'{indent}  iterator_types = ["parallel", "parallel"]',
+            f"{indent}}} ins({exp_name}, {sum_name} : {matrix_type}, {row_type}) "
+            f"outs({output_name} : {output_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %sum: {scalar}, %out: {scalar}):",
+            f"{indent}  %div = arith.divf %in, %sum : {scalar}",
+            f"{indent}  linalg.yield %div : {scalar}",
+            f"{indent}}}",
+        ]
+
+    def _emit_layer_norm(self, node: Node, result_name: str, indent: str) -> list[str]:
+        x, weight, bias = node.inputs
+        output = node.outputs[0]
+        if x.rank != 2 or output.rank != 2:
+            raise MLIRBuilderError(
+                "linalg layer_norm lowering currently supports rank-2"
+            )
+        epsilon = float(node.attrs.get("epsilon", 1e-5))
+        suffix = result_name.lstrip("%")
+        scalar = self._scalar_type(output.dtype)
+        row_type = self._memref_type_for((x.shape[0],), output.dtype)
+        matrix_type = self._memref_type_for(x.shape, output.dtype)
+        weight_type = self._memref_type(weight)
+        bias_type = self._memref_type(bias)
+        mean_sum = f"%ln_sum_{suffix}"
+        mean = f"%ln_mean_{suffix}"
+        centered = f"%ln_centered_{suffix}"
+        square = f"%ln_square_{suffix}"
+        var_sum = f"%ln_var_sum_{suffix}"
+        variance = f"%ln_variance_{suffix}"
+        rstd = f"%ln_rstd_{suffix}"
+        normalized = f"%ln_normalized_{suffix}"
+        d = float(x.shape[1])
+        reciprocal_d = 1.0 / d
+        identity = "affine_map<(d0, d1) -> (d0, d1)>"
+        reduce = "affine_map<(d0, d1) -> (d0)>"
+        feature = "affine_map<(d0, d1) -> (d1)>"
+
+        return [
+            f"{indent}{mean_sum} = memref.alloc() : {row_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {reduce}],",
+            f'{indent}  iterator_types = ["parallel", "reduction"]',
+            f"{indent}}} ins({self._value_names[x.name]} : {self._memref_type(x)}) "
+            f"outs({mean_sum} : {row_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %sum = arith.addf %in, %out : {scalar}",
+            f"{indent}  linalg.yield %sum : {scalar}",
+            f"{indent}}}",
+            f"{indent}{mean} = memref.alloc() : {row_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [affine_map<(d0) -> (d0)>, "
+            "affine_map<(d0) -> (d0)>],",
+            f'{indent}  iterator_types = ["parallel"]',
+            f"{indent}}} ins({mean_sum} : {row_type}) outs({mean} : {row_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %c = arith.constant {reciprocal_d!r} : {scalar}",
+            f"{indent}  %mean = arith.mulf %in, %c : {scalar}",
+            f"{indent}  linalg.yield %mean : {scalar}",
+            f"{indent}}}",
+            f"{indent}{centered} = memref.alloc() : {matrix_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {reduce}, {identity}],",
+            f'{indent}  iterator_types = ["parallel", "parallel"]',
+            f"{indent}}} ins({self._value_names[x.name]}, {mean} : "
+            f"{self._memref_type(x)}, {row_type}) outs({centered} : {matrix_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %mean: {scalar}, %out: {scalar}):",
+            f"{indent}  %sub = arith.subf %in, %mean : {scalar}",
+            f"{indent}  linalg.yield %sub : {scalar}",
+            f"{indent}}}",
+            f"{indent}{square} = memref.alloc() : {matrix_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {identity}],",
+            f'{indent}  iterator_types = ["parallel", "parallel"]',
+            f"{indent}}} ins({centered} : {matrix_type}) "
+            f"outs({square} : {matrix_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %sq = arith.mulf %in, %in : {scalar}",
+            f"{indent}  linalg.yield %sq : {scalar}",
+            f"{indent}}}",
+            f"{indent}{var_sum} = memref.alloc() : {row_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {reduce}],",
+            f'{indent}  iterator_types = ["parallel", "reduction"]',
+            f"{indent}}} ins({square} : {matrix_type}) "
+            f"outs({var_sum} : {row_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %sum = arith.addf %in, %out : {scalar}",
+            f"{indent}  linalg.yield %sum : {scalar}",
+            f"{indent}}}",
+            f"{indent}{variance} = memref.alloc() : {row_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [affine_map<(d0) -> (d0)>, "
+            "affine_map<(d0) -> (d0)>],",
+            f'{indent}  iterator_types = ["parallel"]',
+            f"{indent}}} ins({var_sum} : {row_type}) outs({variance} : {row_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %c = arith.constant {reciprocal_d!r} : {scalar}",
+            f"{indent}  %var = arith.mulf %in, %c : {scalar}",
+            f"{indent}  linalg.yield %var : {scalar}",
+            f"{indent}}}",
+            f"{indent}{rstd} = memref.alloc() : {row_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [affine_map<(d0) -> (d0)>, "
+            "affine_map<(d0) -> (d0)>],",
+            f'{indent}  iterator_types = ["parallel"]',
+            f"{indent}}} ins({variance} : {row_type}) outs({rstd} : {row_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %eps = arith.constant {_mlir_float(epsilon)} : {scalar}",
+            f"{indent}  %sum = arith.addf %in, %eps : {scalar}",
+            f"{indent}  %r = math.rsqrt %sum : {scalar}",
+            f"{indent}  linalg.yield %r : {scalar}",
+            f"{indent}}}",
+            f"{indent}{normalized} = memref.alloc() : {matrix_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {reduce}, {identity}],",
+            f'{indent}  iterator_types = ["parallel", "parallel"]',
+            f"{indent}}} ins({centered}, {rstd} : {matrix_type}, {row_type}) "
+            f"outs({normalized} : {matrix_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %rstd: {scalar}, %out: {scalar}):",
+            f"{indent}  %norm = arith.mulf %in, %rstd : {scalar}",
+            f"{indent}  linalg.yield %norm : {scalar}",
+            f"{indent}}}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {feature}, {feature}, "
+            f"{identity}],",
+            f'{indent}  iterator_types = ["parallel", "parallel"]',
+            f"{indent}}} ins({normalized}, {self._value_names[weight.name]}, "
+            f"{self._value_names[bias.name]} : {matrix_type}, {weight_type}, "
+            f"{bias_type}) outs({result_name} : {self._memref_type(output)}) {{",
+            f"{indent}^bb0(%in: {scalar}, %w: {scalar}, %b: {scalar}, "
+            f"%out: {scalar}):",
+            f"{indent}  %scaled = arith.mulf %in, %w : {scalar}",
+            f"{indent}  %biased = arith.addf %scaled, %b : {scalar}",
+            f"{indent}  linalg.yield %biased : {scalar}",
+            f"{indent}}}",
+        ]
+
+    def _emit_rms_norm(self, node: Node, result_name: str, indent: str) -> list[str]:
+        x, weight = node.inputs
+        output = node.outputs[0]
+        if x.rank != 2 or output.rank != 2:
+            raise MLIRBuilderError("linalg rms_norm lowering currently supports rank-2")
+        epsilon = float(node.attrs.get("epsilon", 1e-5))
+        suffix = result_name.lstrip("%")
+        scalar = self._scalar_type(output.dtype)
+        row_type = self._memref_type_for((x.shape[0],), output.dtype)
+        matrix_type = self._memref_type_for(x.shape, output.dtype)
+        identity = "affine_map<(d0, d1) -> (d0, d1)>"
+        reduce = "affine_map<(d0, d1) -> (d0)>"
+        feature = "affine_map<(d0, d1) -> (d1)>"
+        square = f"%rms_square_{suffix}"
+        square_sum = f"%rms_square_sum_{suffix}"
+        mean_square = f"%rms_mean_square_{suffix}"
+        rstd = f"%rms_rstd_{suffix}"
+        normalized = f"%rms_normalized_{suffix}"
+        reciprocal_d = 1.0 / float(x.shape[1])
+
+        return [
+            f"{indent}{square} = memref.alloc() : {matrix_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {identity}],",
+            f'{indent}  iterator_types = ["parallel", "parallel"]',
+            f"{indent}}} ins({self._value_names[x.name]} : {self._memref_type(x)}) "
+            f"outs({square} : {matrix_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %sq = arith.mulf %in, %in : {scalar}",
+            f"{indent}  linalg.yield %sq : {scalar}",
+            f"{indent}}}",
+            f"{indent}{square_sum} = memref.alloc() : {row_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {reduce}],",
+            f'{indent}  iterator_types = ["parallel", "reduction"]',
+            f"{indent}}} ins({square} : {matrix_type}) "
+            f"outs({square_sum} : {row_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %sum = arith.addf %in, %out : {scalar}",
+            f"{indent}  linalg.yield %sum : {scalar}",
+            f"{indent}}}",
+            f"{indent}{mean_square} = memref.alloc() : {row_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [affine_map<(d0) -> (d0)>, "
+            "affine_map<(d0) -> (d0)>],",
+            f'{indent}  iterator_types = ["parallel"]',
+            f"{indent}}} ins({square_sum} : {row_type}) "
+            f"outs({mean_square} : {row_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %c = arith.constant {reciprocal_d!r} : {scalar}",
+            f"{indent}  %mean = arith.mulf %in, %c : {scalar}",
+            f"{indent}  linalg.yield %mean : {scalar}",
+            f"{indent}}}",
+            f"{indent}{rstd} = memref.alloc() : {row_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [affine_map<(d0) -> (d0)>, "
+            "affine_map<(d0) -> (d0)>],",
+            f'{indent}  iterator_types = ["parallel"]',
+            f"{indent}}} ins({mean_square} : {row_type}) "
+            f"outs({rstd} : {row_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %out: {scalar}):",
+            f"{indent}  %eps = arith.constant {_mlir_float(epsilon)} : {scalar}",
+            f"{indent}  %sum = arith.addf %in, %eps : {scalar}",
+            f"{indent}  %r = math.rsqrt %sum : {scalar}",
+            f"{indent}  linalg.yield %r : {scalar}",
+            f"{indent}}}",
+            f"{indent}{normalized} = memref.alloc() : {matrix_type}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {reduce}, {identity}],",
+            f'{indent}  iterator_types = ["parallel", "parallel"]',
+            f"{indent}}} ins({self._value_names[x.name]}, {rstd} : "
+            f"{self._memref_type(x)}, {row_type}) outs({normalized} : {matrix_type}) {{",
+            f"{indent}^bb0(%in: {scalar}, %rstd: {scalar}, %out: {scalar}):",
+            f"{indent}  %norm = arith.mulf %in, %rstd : {scalar}",
+            f"{indent}  linalg.yield %norm : {scalar}",
+            f"{indent}}}",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {feature}, {identity}],",
+            f'{indent}  iterator_types = ["parallel", "parallel"]',
+            f"{indent}}} ins({normalized}, {self._value_names[weight.name]} : "
+            f"{matrix_type}, {self._memref_type(weight)}) "
+            f"outs({result_name} : {self._memref_type(output)}) {{",
+            f"{indent}^bb0(%in: {scalar}, %w: {scalar}, %out: {scalar}):",
+            f"{indent}  %scaled = arith.mulf %in, %w : {scalar}",
+            f"{indent}  linalg.yield %scaled : {scalar}",
+            f"{indent}}}",
+        ]
+
+    def _emit_attention(self, node: Node, result_name: str, indent: str) -> list[str]:
+        q, k, v = node.inputs[:3]
+        output = node.outputs[0]
+        if (
+            q.rank != 4
+            or k.rank != 4
+            or v.rank != 4
+            or q.shape[:2] != (1, 1)
+            or k.shape[:2] != (1, 1)
+            or v.shape[:2] != (1, 1)
+        ):
+            raise MLIRBuilderError(
+                "linalg attention lowering currently supports rank-4 Q/K/V "
+                "with batch=1 and heads=1"
+            )
+        suffix = result_name.lstrip("%")
+        seq = q.shape[2]
+        dim = q.shape[3]
+        scalar = self._scalar_type(output.dtype)
+        q2_type = self._memref_type_for((seq, dim), output.dtype)
+        k2_type = self._memref_type_for((seq, dim), output.dtype)
+        v2_type = self._memref_type_for((seq, dim), output.dtype)
+        scores_type = self._memref_type_for((seq, seq), output.dtype)
+        attn_type = self._memref_type_for((seq, seq), output.dtype)
+        out2_type = self._memref_type_for((seq, dim), output.dtype)
+        q2 = f"%attn_q_{suffix}"
+        k2 = f"%attn_k_{suffix}"
+        v2 = f"%attn_v_{suffix}"
+        scores = f"%attn_scores_{suffix}"
+        attn = f"%attn_weights_{suffix}"
+        out2 = f"%attn_out_{suffix}"
+        lines = [
+            f"{indent}{q2} = memref.collapse_shape "
+            f"{self._value_names[q.name]} [[0, 1, 2], [3]] : "
+            f"{self._memref_type(q)} into {q2_type}",
+            f"{indent}{k2} = memref.collapse_shape "
+            f"{self._value_names[k.name]} [[0, 1, 2], [3]] : "
+            f"{self._memref_type(k)} into {k2_type}",
+            f"{indent}{v2} = memref.collapse_shape "
+            f"{self._value_names[v.name]} [[0, 1, 2], [3]] : "
+            f"{self._memref_type(v)} into {v2_type}",
+            f"{indent}{scores} = memref.alloc() : {scores_type}",
+            f"{indent}linalg.matmul_transpose_b "
+            f"ins({q2}, {k2} : {q2_type}, {k2_type}) "
+            f"outs({scores} : {scores_type})",
+            f"{indent}{attn} = memref.alloc() : {attn_type}",
+        ]
+        lines.extend(
+            self._emit_softmax_decomposition(
+                scores,
+                scores_type,
+                attn,
+                attn_type,
+                (seq, seq),
+                output.dtype,
+                f"{suffix}_scores",
+                indent,
+            )
+        )
+        lines.extend(
+            [
+                f"{indent}{out2} = memref.collapse_shape {result_name} "
+                f"[[0, 1, 2], [3]] : {self._memref_type(output)} into {out2_type}",
+                f"{indent}linalg.matmul "
+                f"ins({attn}, {v2} : {attn_type}, {v2_type}) "
+                f"outs({out2} : {out2_type})",
+            ]
+        )
+        return lines
 
     def _emit_transformer_placeholder(
         self, node: Node, result_name: str, indent: str
@@ -574,8 +1013,11 @@ class MLIRBuilder:
         ]
 
     def _memref_type(self, value: Value) -> str:
-        shape = "x".join(str(dim) for dim in value.shape)
-        scalar = self._scalar_type(value.dtype)
+        return self._memref_type_for(value.shape, value.dtype)
+
+    def _memref_type_for(self, shape: tuple[int, ...], dtype: DType) -> str:
+        shape = "x".join(str(dim) for dim in shape)
+        scalar = self._scalar_type(dtype)
         return f"memref<{shape}x{scalar}>" if shape else f"memref<{scalar}>"
 
     def _scalar_type(self, dtype: DType) -> str:
@@ -612,3 +1054,10 @@ def _dense_i64_2(value: tuple[int, int]) -> str:
     if value[0] == value[1]:
         return f"dense<{value[0]}> : tensor<2xi64>"
     return f"dense<[{value[0]}, {value[1]}]> : tensor<2xi64>"
+
+
+def _mlir_float(value: float) -> str:
+    """Return an MLIR-parsable decimal/float literal."""
+    if value == 0.0:
+        return "0.000000e+00"
+    return f"{value:.10e}"

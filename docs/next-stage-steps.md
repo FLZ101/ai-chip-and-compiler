@@ -285,6 +285,10 @@ Done when:
 
 ### 3.1 Implement `model-to-linalg`
 
+Status: **done**
+
+Reference: [step-3.1.md](step-3.1.md)
+
 Lower high-level model ops:
 
 - attention,
