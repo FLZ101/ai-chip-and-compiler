@@ -3,6 +3,7 @@ add_mlir_dialect_library(MLIRMGPU
   MGPUOps.cpp
   TileLinalgPass.cpp
   MapToMGPUPass.cpp
+  LowerToMGPUPass.cpp
   MGPUPasses.cpp
 
   ADDITIONAL_HEADER_DIRS

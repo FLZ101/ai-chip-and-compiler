@@ -357,6 +357,10 @@ Tests:
 
 ### 3.5 Implement `lower-to-mgpu`
 
+Status: **done**
+
+Reference: [step-3.5.md](step-3.5.md)
+
 Insert:
 
 - `mgpu.shared_alloc`,

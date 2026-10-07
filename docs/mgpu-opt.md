@@ -54,6 +54,7 @@ Today `mgpu-opt` can:
 - print the module back deterministically,
 - run the `tile-linalg` pass to tile buffer-form linalg operations,
 - run the `map-to-mgpu` pass to map top-level loops to `mgpu.launch`,
+- run the `lower-to-mgpu` pass to insert shared memory/copy/barrier/mma ops,
 - run upstream passes such as `one-shot-bufferize`.
 
 The remaining project-specific lowering passes are implemented in later phases.
@@ -143,7 +144,6 @@ mgpu-opt input.mlir \
 
 The following passes will be implemented inside or invoked by `mgpu-opt`:
 
-- `lower-to-mgpu`
 - `mgpu-to-isa`
 
 Each pass should have FileCheck tests in `tests/mlir/`.

@@ -7,4 +7,6 @@ void mlir::mgpu::registerMGPUPasses() {
       []() -> std::unique_ptr<mlir::Pass> { return createTileLinalgPass(); });
   mlir::registerPass(
       []() -> std::unique_ptr<mlir::Pass> { return createMapToMGPUPass(); });
+  mlir::registerPass(
+      []() -> std::unique_ptr<mlir::Pass> { return createLowerToMGPUPass(); });
 }
