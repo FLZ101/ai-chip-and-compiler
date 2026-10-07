@@ -9,16 +9,16 @@ and `mgpu` dialect) and Step 007 (shared operator E2E harness), Step 008
 (CNN kernels), Step 011 (CNN normalization and detection helpers), Step 012
 (Transformer normalization and softmax), Step 013 (attention, RoPE, and
 KV-cache), Step 014 (ONNX and PyTorch FX frontends), and Step 015 (runtime and
-driver), and Step 016 (CNN/object-detection model examples) are now also
-implemented.
+driver), Step 016 (CNN/object-detection model examples), and Step 017
+(Transformer/LLM model examples) are now also implemented.
 They are described in [step-002.md](step-002.md), [step-003.md](step-003.md),
 [step-004.md](step-004.md), [step-005.md](step-005.md), and
 [step-006.md](step-006.md), [step-007.md](step-007.md), and
 [step-008.md](step-008.md), [step-009.md](step-009.md),
 [step-010.md](step-010.md), [step-011.md](step-011.md), and
 [step-012.md](step-012.md), [step-013.md](step-013.md), and
-[step-014.md](step-014.md), [step-015.md](step-015.md), and
-[step-016.md](step-016.md).
+[step-014.md](step-014.md), [step-015.md](step-015.md),
+[step-016.md](step-016.md), and [step-017.md](step-017.md).
 
 The first milestone is intentionally narrow: prove that we can parse a small GPU ISA, model global/shared memory, execute a simple SIMT warp, and run an end-to-end vector-add program against a deterministic simulator.
 
@@ -213,5 +213,5 @@ Expected result: all current tests pass.
 
 ## 7. Next step
 
-The next step is to add Transformer/LLM model examples.  This is described as
-Step 017 in [steps.md](steps.md).
+The next step is hardening and documentation.  This is described as Step 018 in
+[steps.md](steps.md).

@@ -489,6 +489,8 @@ Reference:
 
 ## Step 017: Transformer/LLM model examples
 
+Status: **done**
+
 Goal:
 
 - Validate the complete Transformer path.
@@ -503,6 +505,10 @@ Examples:
 Exit criteria:
 
 - Transformer examples compile and match reference.
+
+Reference:
+
+- [step-017.md](step-017.md)
 
 ---
 
