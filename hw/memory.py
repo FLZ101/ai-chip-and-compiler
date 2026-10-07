@@ -42,6 +42,49 @@ class ByteMemory:
         self.check(addr, 4)
         struct.pack_into("<f", self.data, addr, value)
 
+    def read_f16(self, addr: int) -> float:
+        self.check(addr, 2)
+        return struct.unpack_from("<e", self.data, addr)[0]
+
+    def write_f16(self, addr: int, value: float) -> None:
+        self.check(addr, 2)
+        struct.pack_into("<e", self.data, addr, value)
+
+    def read_bf16(self, addr: int) -> float:
+        self.check(addr, 2)
+        bits = struct.unpack_from("<H", self.data, addr)[0]
+        return struct.unpack("<f", struct.pack("<I", bits << 16))[0]
+
+    def write_bf16(self, addr: int, value: float) -> None:
+        self.check(addr, 2)
+        f32_bits = struct.unpack("<I", struct.pack("<f", value))[0]
+        bf16_bits = (f32_bits + 0x8000) >> 16
+        struct.pack_into("<H", self.data, addr, bf16_bits & 0xFFFF)
+
+    def read_i8(self, addr: int) -> int:
+        self.check(addr, 1)
+        return struct.unpack_from("<b", self.data, addr)[0]
+
+    def write_i8(self, addr: int, value: int) -> None:
+        self.check(addr, 1)
+        struct.pack_into("<b", self.data, addr, value)
+
+    def read_u8(self, addr: int) -> int:
+        self.check(addr, 1)
+        return struct.unpack_from("<B", self.data, addr)[0]
+
+    def write_u8(self, addr: int, value: int) -> None:
+        self.check(addr, 1)
+        struct.pack_into("<B", self.data, addr, value)
+
+    def read_i32(self, addr: int) -> int:
+        self.check(addr, 4)
+        return struct.unpack_from("<i", self.data, addr)[0]
+
+    def write_i32(self, addr: int, value: int) -> None:
+        self.check(addr, 4)
+        struct.pack_into("<i", self.data, addr, value)
+
     def read_u32(self, addr: int) -> int:
         self.check(addr, 4)
         return struct.unpack_from("<I", self.data, addr)[0]

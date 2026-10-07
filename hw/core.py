@@ -710,6 +710,43 @@ def _execute_barrier(sm: SM, warp: WarpState) -> None:
             waiting_warp.pc += 1
 
 
+def _memory_type(op: str) -> str:
+    return op.split(".", 1)[1] if "." in op else "f32"
+
+
+def _read_typed(memory: ByteMemory, dtype: str, addr: int) -> int | float:
+    if dtype == "f32":
+        return memory.read_f32(addr)
+    if dtype == "F16":
+        return memory.read_f16(addr)
+    if dtype == "BF16":
+        return memory.read_bf16(addr)
+    if dtype == "I8":
+        return memory.read_i8(addr)
+    if dtype == "U8":
+        return memory.read_u8(addr)
+    if dtype == "I32":
+        return memory.read_i32(addr)
+    raise NotImplementedError(f"unsupported memory type: {dtype}")
+
+
+def _write_typed(memory: ByteMemory, dtype: str, addr: int, value: int | float) -> None:
+    if dtype == "f32":
+        memory.write_f32(addr, float(value))
+    elif dtype == "F16":
+        memory.write_f16(addr, float(value))
+    elif dtype == "BF16":
+        memory.write_bf16(addr, float(value))
+    elif dtype == "I8":
+        memory.write_i8(addr, int(value))
+    elif dtype == "U8":
+        memory.write_u8(addr, int(value))
+    elif dtype == "I32":
+        memory.write_i32(addr, int(value))
+    else:
+        raise NotImplementedError(f"unsupported memory type: {dtype}")
+
+
 def execute_warp(
     device: Device,
     sm: SM,
@@ -739,7 +776,7 @@ def execute_warp(
         return
 
     for lane in warp.active_lanes:
-        if op in {"LDG", "LDS"}:
+        if op.startswith("LDG") or op.startswith("LDS"):
             # Loads read 4 bytes from either global or shared memory.  Each
             # lane computes its own address from its own register values.
             if not isinstance(instruction.dst, Reg):
@@ -748,10 +785,10 @@ def execute_warp(
             if not isinstance(mem_operand, Mem):
                 raise ValueError(f"{op} source is not a memory operand")
             addr = as_int(_read_operand(device, sm, warp, lane, mem_operand))
-            memory = device.global_memory if op == "LDG" else sm.shared_memory
-            value = memory.read_f32(addr)
+            memory = device.global_memory if op.startswith("LDG") else sm.shared_memory
+            value = _read_typed(memory, _memory_type(op), addr)
             _write_register(lane, instruction.dst, value)
-        elif op in {"STG", "STS"}:
+        elif op.startswith("STG") or op.startswith("STS"):
             # Stores write the value from the source register to the resolved
             # per-lane address.  Shared-memory writes are made visible to all
             # warps in the block by the BAR.SYNC implementation above.
@@ -760,8 +797,8 @@ def execute_warp(
                 raise ValueError(f"{op} destination is not a memory operand")
             value = _read_operand(device, sm, warp, lane, instruction.srcs[0])
             addr = as_int(_read_operand(device, sm, warp, lane, mem_operand))
-            memory = device.global_memory if op == "STG" else sm.shared_memory
-            memory.write_f32(addr, float(value))
+            memory = device.global_memory if op.startswith("STG") else sm.shared_memory
+            _write_typed(memory, _memory_type(op), addr, value)
         elif op in {
             "ADD",
             "SUB",

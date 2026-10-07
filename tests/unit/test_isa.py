@@ -43,6 +43,21 @@ class TestIsaParser(unittest.TestCase):
         program = parse_asm("IDIV R1, R2, R3")
         self.assertEqual(program[0].op, "IDIV")
 
+    def test_parse_typed_memory_accesses(self):
+        program = parse_asm("""
+            LDG.F16 R0, [R1]
+            STG.BF16 [R1], R0
+            LDS.I8 R2, [R3]
+            STS.U8 [R3], R2
+            LDG.I32 R4, [R5]
+            STG.I32 [R5], R4
+        """)
+
+        self.assertEqual(
+            [instr.op for instr in program],
+            ["LDG.F16", "STG.BF16", "LDS.I8", "STS.U8", "LDG.I32", "STG.I32"],
+        )
+
     def test_round_trip(self):
         # Round-tripping through the formatter must produce the same program.
         # This guarantees the MLIR backend can emit and reload ISA text later.

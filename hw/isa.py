@@ -65,12 +65,35 @@ REGISTER_DEST_OPS = {
     # Global and shared loads write a destination register.
     "LDG",
     "LDS",
+    "LDG.F16",
+    "LDS.F16",
+    "LDG.BF16",
+    "LDS.BF16",
+    "LDG.I8",
+    "LDS.I8",
+    "LDG.U8",
+    "LDS.U8",
+    "LDG.I32",
+    "LDS.I32",
 }
 
 # Opcodes whose first operand is a memory destination.  Memory stores use a
 # different order from loads so the assembly remains close to typical SIMT ISAs:
 #   STG [addr], value
-MEMORY_DEST_OPS = {"STG", "STS"}
+MEMORY_DEST_OPS = {
+    "STG",
+    "STS",
+    "STG.F16",
+    "STS.F16",
+    "STG.BF16",
+    "STS.BF16",
+    "STG.I8",
+    "STS.I8",
+    "STG.U8",
+    "STS.U8",
+    "STG.I32",
+    "STS.I32",
+}
 # Opcodes that affect control flow.  Labels are resolved by the parser and
 # used by the SIMT branch implementation in the execution core.
 CONTROL_OPS = {"BRA", "RET", "EXIT", "BAR.SYNC"}

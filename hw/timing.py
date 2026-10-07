@@ -59,9 +59,9 @@ def opcode_class(op: str) -> str:
     The possible values are ``global_memory``, ``shared_memory``,
     ``special``, ``control``, and ``alu``.
     """
-    if op in GLOBAL_MEMORY_OPS:
+    if op.startswith(("LDG", "STG")):
         return "global_memory"
-    if op in SHARED_MEMORY_OPS:
+    if op.startswith(("LDS", "STS")):
         return "shared_memory"
     if op in SPECIAL_ALU_OPS:
         return "special"
@@ -138,8 +138,8 @@ class ProfileCounters:
 
 def memory_bandwidth(op: str, model: TimingModel = DEFAULT_TIMING_MODEL) -> int:
     """Return bytes-per-cycle available to an opcode's memory space."""
-    if op in GLOBAL_MEMORY_OPS:
+    if op.startswith(("LDG", "STG")):
         return model.global_bandwidth_bytes_per_cycle
-    if op in SHARED_MEMORY_OPS:
+    if op.startswith(("LDS", "STS")):
         return model.shared_bandwidth_bytes_per_cycle
     raise ValueError(f"{op} is not a memory instruction")
