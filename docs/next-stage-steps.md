@@ -327,6 +327,10 @@ Tests:
 
 ### 3.3 Implement bufferization
 
+Status: **done**
+
+Reference: [step-3.3.md](step-3.3.md)
+
 Convert tensors to `memref`.
 
 Tests:

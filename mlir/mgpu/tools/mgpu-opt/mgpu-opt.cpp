@@ -1,4 +1,5 @@
 #include "mlir/InitAllDialects.h"
+#include "mlir/InitAllPasses.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
 #include "mgpu/MGPUDialect.h"
@@ -7,6 +8,7 @@
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
+  mlir::registerAllPasses();
   registry.insert<mlir::mgpu::MGPUDialect>();
   mlir::mgpu::registerMGPUPasses();
 

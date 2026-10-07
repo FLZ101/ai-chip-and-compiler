@@ -52,7 +52,8 @@ Today `mgpu-opt` can:
 - register the `mgpu` dialect,
 - verify custom `mgpu.*` operations,
 - print the module back deterministically,
-- run the `tile-linalg` pass to tile buffer-form linalg operations.
+- run the `tile-linalg` pass to tile buffer-form linalg operations,
+- run upstream passes such as `one-shot-bufferize`.
 
 The remaining project-specific lowering passes are implemented in later phases.
 
