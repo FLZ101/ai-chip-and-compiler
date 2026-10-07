@@ -432,6 +432,8 @@ Reference:
 
 ## Step 015: Runtime and driver
 
+Status: **done**
+
 Goal:
 
 - Provide a stable host/device API.
@@ -453,6 +455,10 @@ Features:
 Exit criteria:
 
 - Multiple launches are deterministic and do not corrupt state.
+
+Reference:
+
+- [step-015.md](step-015.md)
 
 ---
 
