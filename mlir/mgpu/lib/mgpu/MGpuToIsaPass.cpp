@@ -259,71 +259,84 @@ struct MGpuToIsaPass
     int64_t bBase = m * k * 4;
     int64_t cBase = bBase + k * n * 4;
 
+    VirtualRegisterAllocator regs;
+    int tidX = regs.acquire();
+    int tidY = regs.acquire();
+    int acc = regs.acquire();
+    int addr = regs.acquire();
+    int offset = regs.acquire();
+    int base = regs.acquire();
+    int value = regs.acquire();
+    int shared = regs.acquire();
+    int smem = regs.acquire();
+    auto R = [&](int reg) { return regs.name(reg); };
+
     std::string code;
     llvm::raw_string_ostream os(code);
-    os << "MOV R0, tid.x\n"
-       << "MOV R1, tid.y\n"
-       << "MOV R20, 0\n";
+    os << "MOV " << R(tidX) << ", tid.x\n"
+       << "MOV " << R(tidY) << ", tid.y\n"
+       << "MOV " << R(acc) << ", 0\n";
 
     for (int64_t kStart = 0; kStart < k; kStart += tile) {
-      os << "MUL R2, R1, " << k << "\n"
-         << "MOV R3, " << kStart << "\n"
-         << "ADD R3, R3, R0\n"
-         << "ADD R2, R2, R3\n"
-         << "MUL R2, R2, 4\n"
-         << "MOV R4, " << aBase << "\n"
-         << "ADD R2, R2, R4\n"
-         << "LDG R5, [R2]\n"
-         << "MUL R6, R1, " << tile << "\n"
-         << "ADD R6, R6, R0\n"
-         << "MUL R6, R6, 4\n"
-         << "STS [R6], R5\n";
+      os << "MUL " << R(addr) << ", " << R(tidY) << ", " << k << "\n"
+         << "MOV " << R(offset) << ", " << kStart << "\n"
+         << "ADD " << R(offset) << ", " << R(offset) << ", " << R(tidX) << "\n"
+         << "ADD " << R(addr) << ", " << R(addr) << ", " << R(offset) << "\n"
+         << "MUL " << R(addr) << ", " << R(addr) << ", 4\n"
+         << "MOV " << R(base) << ", " << aBase << "\n"
+         << "ADD " << R(addr) << ", " << R(addr) << ", " << R(base) << "\n"
+         << "LDG " << R(value) << ", [" << R(addr) << "]\n"
+         << "MUL " << R(shared) << ", " << R(tidY) << ", " << tile << "\n"
+         << "ADD " << R(shared) << ", " << R(shared) << ", " << R(tidX) << "\n"
+         << "MUL " << R(shared) << ", " << R(shared) << ", 4\n"
+         << "STS [" << R(shared) << "], " << R(value) << "\n";
 
-      os << "MUL R2, R1, " << n << "\n"
-         << "ADD R2, R2, R0\n"
-         << "MUL R2, R2, 4\n"
-         << "MOV R3, " << smemBOffset << "\n"
-         << "ADD R2, R2, R3\n"
-         << "MOV R4, " << kStart << "\n"
-         << "ADD R4, R4, R1\n"
-         << "MUL R4, R4, " << n << "\n"
-         << "ADD R4, R4, R0\n"
-         << "MUL R4, R4, 4\n"
-         << "MOV R5, " << bBase << "\n"
-         << "ADD R4, R4, R5\n"
-         << "LDG R6, [R4]\n"
-         << "STS [R2], R6\n"
+      os << "MUL " << R(addr) << ", " << R(tidY) << ", " << n << "\n"
+         << "ADD " << R(addr) << ", " << R(addr) << ", " << R(tidX) << "\n"
+         << "MUL " << R(addr) << ", " << R(addr) << ", 4\n"
+         << "MOV " << R(offset) << ", " << smemBOffset << "\n"
+         << "ADD " << R(addr) << ", " << R(addr) << ", " << R(offset) << "\n"
+         << "MOV " << R(offset) << ", " << kStart << "\n"
+         << "ADD " << R(offset) << ", " << R(offset) << ", " << R(tidY) << "\n"
+         << "MUL " << R(offset) << ", " << R(offset) << ", " << n << "\n"
+         << "ADD " << R(offset) << ", " << R(offset) << ", " << R(tidX) << "\n"
+         << "MUL " << R(offset) << ", " << R(offset) << ", 4\n"
+         << "MOV " << R(base) << ", " << bBase << "\n"
+         << "ADD " << R(offset) << ", " << R(offset) << ", " << R(base) << "\n"
+         << "LDG " << R(value) << ", [" << R(offset) << "]\n"
+         << "STS [" << R(addr) << "], " << R(value) << "\n"
          << "BAR.SYNC\n";
 
-      os << "MOV R7, " << smemBOffset << "\n";
+      os << "MOV " << R(smem) << ", " << smemBOffset << "\n";
       for (int64_t inner = 0; inner < tile; ++inner) {
-        os << "MUL R2, R1, " << tile << "\n"
-           << "ADD R2, R2, " << inner << "\n"
-           << "MUL R2, R2, 4\n"
-           << "LDS R3, [R2]\n"
-           << "MOV R4, " << (inner * n) << "\n"
-           << "ADD R4, R4, R0\n"
-           << "MUL R4, R4, 4\n"
-           << "ADD R4, R4, R7\n"
-           << "LDS R5, [R4]\n"
-           << "FMA R20, R3, R5, R20\n";
+        os << "MUL " << R(addr) << ", " << R(tidY) << ", " << tile << "\n"
+           << "ADD " << R(addr) << ", " << R(addr) << ", " << inner << "\n"
+           << "MUL " << R(addr) << ", " << R(addr) << ", 4\n"
+           << "LDS " << R(value) << ", [" << R(addr) << "]\n"
+           << "MOV " << R(offset) << ", " << (inner * n) << "\n"
+           << "ADD " << R(offset) << ", " << R(offset) << ", " << R(tidX) << "\n"
+           << "MUL " << R(offset) << ", " << R(offset) << ", 4\n"
+           << "ADD " << R(offset) << ", " << R(offset) << ", " << R(smem) << "\n"
+           << "LDS " << R(shared) << ", [" << R(offset) << "]\n"
+           << "FMA " << R(acc) << ", " << R(value) << ", " << R(shared) << ", "
+           << R(acc) << "\n";
       }
       os << "BAR.SYNC\n";
     }
 
-    os << "MUL R2, R1, " << n << "\n"
-       << "ADD R2, R2, R0\n"
-       << "MUL R2, R2, 4\n"
-       << "MOV R3, " << cBase << "\n"
-       << "ADD R2, R2, R3\n"
-       << "STG [R2], R20\n"
+    os << "MUL " << R(addr) << ", " << R(tidY) << ", " << n << "\n"
+       << "ADD " << R(addr) << ", " << R(addr) << ", " << R(tidX) << "\n"
+       << "MUL " << R(addr) << ", " << R(addr) << ", 4\n"
+       << "MOV " << R(offset) << ", " << cBase << "\n"
+       << "ADD " << R(addr) << ", " << R(addr) << ", " << R(offset) << "\n"
+       << "STG [" << R(addr) << "], " << R(acc) << "\n"
        << "EXIT\n";
     os.flush();
 
     IsaText result;
     result.code = code;
     result.grid = "1x1x1";
-    result.block = std::to_string(n) + "x" + std::to_string(m);
+    result.block = std::to_string(n) + "x" + std::to_string(m) + "x1";
     return result;
   }
 
