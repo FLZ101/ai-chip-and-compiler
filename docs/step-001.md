@@ -3,9 +3,11 @@
 This document describes the first implemented vertical slice in the repository.
 Step 002 (branches, divergence, and reconvergence) and Step 003 (block barriers
 and multi-warp scheduling), and Step 004 (timing model and performance counters)
-and Step 005 (unified Model IR and manual frontend) are now also implemented.
+and Step 005 (unified Model IR and manual frontend) and Step 006 (MLIR builder
+and `mgpu` dialect) are now also implemented.
 They are described in [step-002.md](step-002.md), [step-003.md](step-003.md),
-[step-004.md](step-004.md), and [step-005.md](step-005.md).
+[step-004.md](step-004.md), [step-005.md](step-005.md), and
+[step-006.md](step-006.md).
 
 The first milestone is intentionally narrow: prove that we can parse a small GPU ISA, model global/shared memory, execute a simple SIMT warp, and run an end-to-end vector-add program against a deterministic simulator.
 
@@ -200,6 +202,6 @@ Expected result: all current tests pass.
 
 ## 7. Next step
 
-The next step is to emit MLIR text for the unified Model IR and introduce the
-small ``mgpu`` device dialect.  This is described as Step 006 in
-[steps.md](steps.md).
+The next step is to create one reusable end-to-end operator test harness that
+runs a graph through MLIR, future ISA codegen, and the simulator.  This is
+described as Step 007 in [steps.md](steps.md).

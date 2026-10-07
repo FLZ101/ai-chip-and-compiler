@@ -179,6 +179,8 @@ Reference:
 
 ## Step 006: MLIR builder and `mgpu` dialect
 
+Status: **done**
+
 Goal:
 
 - Emit real MLIR text for the model graph.
@@ -200,6 +202,10 @@ Use:
 Exit criteria:
 
 - Vector-add, matmul, and conv graphs emit deterministic MLIR text.
+
+Reference:
+
+- [step-006.md](step-006.md)
 
 ---
 
