@@ -6,6 +6,7 @@ from typing import Any
 
 from ..model_ir import Graph, Op
 from .activation_kernels import lower_activation_kernel
+from .cnn_kernels import lower_cnn_kernel
 from .common_kernels import lower_common_kernel
 from .shape_kernels import lower_shape_kernel
 
@@ -37,4 +38,12 @@ def lower_kernel(
         Op.RESIZE,
     }:
         return lower_shape_kernel(graph, mlir_text, layout)
+    if node.op in {
+        Op.CONV2D,
+        Op.DEPTHWISE_CONV2D,
+        Op.MAX_POOL2D,
+        Op.AVG_POOL2D,
+        Op.GLOBAL_AVG_POOL,
+    }:
+        return lower_cnn_kernel(graph, mlir_text, layout)
     return lower_common_kernel(graph, mlir_text, layout)

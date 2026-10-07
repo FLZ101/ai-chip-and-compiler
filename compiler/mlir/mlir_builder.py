@@ -172,6 +172,14 @@ class MLIRBuilder:
             return self._emit_matmul(node, result_name, indent)
         if node.op == Op.CONV2D:
             return self._emit_conv2d(node, result_name, indent)
+        if node.op == Op.DEPTHWISE_CONV2D:
+            return self._emit_depthwise_conv2d(node, result_name, indent)
+        if node.op in {
+            Op.MAX_POOL2D,
+            Op.AVG_POOL2D,
+            Op.GLOBAL_AVG_POOL,
+        }:
+            return self._emit_pooling_placeholder(node, result_name, indent)
         if node.op in {
             Op.RELU,
             Op.LEAKY_RELU,
@@ -373,7 +381,7 @@ class MLIRBuilder:
         ]
 
     def _emit_conv2d(self, node: Node, result_name: str, indent: str) -> list[str]:
-        image, weight = node.inputs
+        image, weight = node.inputs[:2]
         output = node.outputs[0]
         padding = node.attrs.get("padding", 0)
         if padding != 0:
@@ -394,6 +402,54 @@ class MLIRBuilder:
             f"{indent}  ins({self._value_names[image.name]}, "
             f"{self._value_names[weight.name]} : {image_type}, {weight_type}) "
             f"outs({result_name} : {out_type}) -> {out_type}",
+        ]
+
+    def _emit_depthwise_conv2d(
+        self, node: Node, result_name: str, indent: str
+    ) -> list[str]:
+        image, weight = node.inputs[:2]
+        output = node.outputs[0]
+        padding = node.attrs.get("padding", 0)
+        if padding != 0:
+            raise MLIRBuilderError(
+                "MLIR depthwise conv lowering currently supports padding=0 only"
+            )
+        strides = _pair(node.attrs.get("strides", 1), "strides")
+        dilations = _pair(node.attrs.get("dilation", 1), "dilation")
+        image_type = self._memref_type(image)
+        weight_type = self._memref_type(weight)
+        out_type = self._memref_type(output)
+        return [
+            f"{indent}{result_name} = linalg.depthwise_conv_2d_nchw_chw",
+            f"{indent}  dilations = {_dense_i64_2(dilations)}",
+            f"{indent}  strides = {_dense_i64_2(strides)}",
+            f"{indent}  ins({self._value_names[image.name]}, "
+            f"{self._value_names[weight.name]} : {image_type}, {weight_type}) "
+            f"outs({result_name} : {out_type}) -> {out_type}",
+        ]
+
+    def _emit_pooling_placeholder(
+        self, node: Node, result_name: str, indent: str
+    ) -> list[str]:
+        value = node.inputs[0]
+        output = node.outputs[0]
+        scalar_type = self._scalar_type(output.dtype)
+        value_type = self._memref_type(value)
+        out_type = self._memref_type(output)
+        dims = ", ".join(f"d{axis}" for axis in range(output.rank))
+        identity = f"affine_map<({dims}) -> ({dims})>"
+        iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
+        return [
+            f"{indent}// Pooling op is lowered by mgpu-to-isa; "
+            "linalg identity is a placeholder.",
+            f"{indent}{result_name} = linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {identity}]",
+            f"{indent}  iterator_types = [{iterator_types}]",
+            f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
+            f"outs({result_name} : {out_type}) {{",
+            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+            f"{indent}  linalg.yield %in : {scalar_type}",
+            f"{indent}}} -> {out_type}",
         ]
 
     def _memref_type(self, value: Value) -> str:

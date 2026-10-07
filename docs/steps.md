@@ -299,6 +299,8 @@ Reference:
 
 ## Step 010: CNN kernels
 
+Status: **done**
+
 Goal:
 
 - Run ordinary CNN layers.
@@ -317,6 +319,10 @@ Initial strategy:
 Exit criteria:
 
 - Conv and pooling E2E tests pass.
+
+Reference:
+
+- [step-010.md](step-010.md)
 
 ---
 
