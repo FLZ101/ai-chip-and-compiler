@@ -253,6 +253,10 @@ Done when:
 
 ### 2.3 Canonicalize imported MLIR
 
+Status: **done**
+
+Reference: [step-2.3.md](step-2.3.md)
+
 Run:
 
 - canonicalization,
