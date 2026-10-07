@@ -46,6 +46,12 @@ REGISTER_DEST_OPS = {
     "LOG2",
     # Predicate/select operations reserved for control-flow lowering.
     "CMP",
+    "CMP.EQ",
+    "CMP.NE",
+    "CMP.LT",
+    "CMP.LE",
+    "CMP.GT",
+    "CMP.GE",
     "SEL",
     # Global and shared loads write a destination register.
     "LDG",
@@ -87,7 +93,17 @@ class Mem:
     offset: int = 0
 
 
-Operand = Reg | Imm | Mem
+@dataclass(frozen=True)
+class Label:
+    """A symbolic branch target.
+
+    Labels are resolved to instruction indices by :func:`parse_asm`.
+    """
+
+    name: str
+
+
+Operand = Reg | Imm | Mem | Label
 
 
 @dataclass(frozen=True)
@@ -172,6 +188,8 @@ def _parse_operand(token: str) -> Operand:
         try:
             return Imm(float(token))
         except ValueError as exc:
+            if token.replace("_", "").replace(".", "").isalnum() and token[0].isalpha():
+                return Label(token)
             raise ValueError(f"invalid operand: {token!r}") from exc
 
 
@@ -273,6 +291,15 @@ def parse_asm(text: str) -> Program:
 
         instructions.append(instr)
 
+    # Branch targets and reconvergence labels must exist by the time parsing
+    # completes.  This keeps branch-address bugs at parse time rather than
+    # during simulator execution.
+    for instruction in instructions:
+        if instruction.op == "BRA":
+            for operand in instruction.operands:
+                if isinstance(operand, Label) and operand.name not in labels:
+                    raise ValueError(f"undefined branch label: {operand.name}")
+
     return Program(instructions, labels)
 
 
@@ -283,12 +310,15 @@ def _format_operand(operand: Operand) -> str:
         if isinstance(operand.value, float):
             return repr(operand.value)
         return str(operand.value)
+    if isinstance(operand, Label):
+        return operand.name
     if operand.offset:
         # Normalize the offset so round-tripping is stable regardless of whether
         # the user wrote +8, -4, or an unsigned immediate.
         sign = "+" if operand.offset > 0 else "-"
         return f"[{operand.base} {sign} {abs(operand.offset)}]"
     return f"[{operand.base}]"
+    raise TypeError(f"unsupported operand for formatting: {operand!r}")
 
 
 def format_instruction(instruction: Instruction) -> str:

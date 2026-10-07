@@ -1,6 +1,8 @@
 # Step 001: First Simulator Vertical Slice
 
-This document describes what is currently implemented in the repository.
+This document describes the first implemented vertical slice in the repository.
+Step 002 (branches, divergence, and reconvergence) is now also implemented and
+is described in [step-002.md](step-002.md).
 
 The first milestone is intentionally narrow: prove that we can parse a small GPU ISA, model global/shared memory, execute a simple SIMT warp, and run an end-to-end vector-add program against a deterministic simulator.
 
@@ -167,9 +169,9 @@ python -m pip install -e '.[dev]'
 
 ## 5. What is intentionally not implemented yet
 
-The current simulator is only the first vertical slice. It does not yet include:
+The current simulator is the first vertical slice plus branch support. It does
+not yet include:
 
-- branch divergence and reconvergence,
 - a real block-scoped barrier,
 - multiple warps per SM,
 - multiple blocks per SM over time,

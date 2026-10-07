@@ -1,6 +1,6 @@
 import unittest
 
-from hw.isa import Imm, Mem, Reg, parse_asm, format_program
+from hw.isa import Imm, Label, Mem, Reg, parse_asm, format_program
 
 
 class TestIsaParser(unittest.TestCase):
@@ -70,6 +70,30 @@ class TestIsaParser(unittest.TestCase):
                 LOOP:
                 EXIT
                 """)
+
+    def test_parse_conditional_branch_and_compare(self):
+        program = parse_asm("""
+            CMP.LT R0, tid, 4
+            BRA else, R0, end
+            MOV R1, 1
+            BRA end
+            else:
+            MOV R1, 2
+            BRA end
+            end:
+            EXIT
+            """)
+
+        self.assertEqual(program[0].op, "CMP.LT")
+        self.assertEqual(program[1].op, "BRA")
+        self.assertEqual(
+            program[1].operands,
+            (Label("else"), Reg("R0"), Label("end")),
+        )
+
+    def test_rejects_undefined_branch_label(self):
+        with self.assertRaises(ValueError):
+            parse_asm("BRA missing")
 
 
 if __name__ == "__main__":

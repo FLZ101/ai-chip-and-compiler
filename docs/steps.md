@@ -46,6 +46,8 @@ Reference:
 
 ## Step 002: Branches, divergence, and reconvergence
 
+Status: **done**
+
 Goal:
 
 - Make the simulator handle SIMT control flow.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .isa import Imm, Instruction, Mem, Program, Reg
+from .isa import Imm, Instruction, Label, Mem, Program, Reg
 from .memory import ByteMemory, RegisterFile, as_int
 
 SPECIAL_REGISTER_NAMES = {
@@ -46,6 +46,7 @@ class WarpState:
     pc: int = 0
     exited: bool = False
     active_mask: int = 0xFFFFFFFF
+    reconvergence_stack: list["ReconvergenceState"] = field(default_factory=list)
 
     @property
     def active_lanes(self) -> list[LaneState]:
@@ -56,6 +57,21 @@ class WarpState:
             for lane in self.lanes
             if lane.active and self.active_mask & (1 << lane.lane_id)
         ]
+
+
+@dataclass
+class ReconvergenceState:
+    """Bookkeeping for one pending side of a divergent branch.
+
+    ``phase`` is ``"taken"`` while the original taken path is running and
+    switches to ``"fallthrough"`` when the saved fallthrough path is running.
+    """
+
+    pending_pc: int
+    pending_mask: int
+    reconvergence_pc: int
+    original_mask: int
+    phase: str = "taken"
 
 
 @dataclass
@@ -94,11 +110,16 @@ class Device:
                 for warp in sm.warps:
                     if warp.exited:
                         continue
+                    # A warp may arrive at a reconvergence label from either
+                    # side of a divergent branch.  Resolve those stack
+                    # transitions before fetching the next instruction.
+                    while _apply_reconvergence(warp):
+                        pass
                     if warp.pc >= len(program):
                         warp.exited = True
                         continue
                     instruction = program[warp.pc]
-                    execute_warp(self, sm, warp, instruction)
+                    execute_warp(self, sm, warp, instruction, program)
 
             if all(warp.exited for sm in self.sms for warp in sm.warps):
                 break
@@ -275,8 +296,152 @@ def _alu(
     raise ValueError(f"unsupported ALU opcode: {op}")
 
 
+def _apply_reconvergence(warp: WarpState) -> bool:
+    """Handle arrival at a divergent-branch reconvergence point.
+
+    Returns ``True`` when the warp PC or active mask changed and the caller
+    should check again before fetching an instruction.
+    """
+    if not warp.reconvergence_stack:
+        return False
+
+    state = warp.reconvergence_stack[-1]
+    if warp.pc != state.reconvergence_pc:
+        return False
+
+    if state.phase == "taken":
+        # The originally taken path reached the join point.  Save its mask and
+        # run the fallthrough side next.
+        warp.active_mask = state.pending_mask
+        warp.pc = state.pending_pc
+        state.phase = "fallthrough"
+        return True
+
+    # The fallthrough side has also reached the join point.  Both sides are
+    # complete, so restore the original mask and pop this branch state.
+    warp.reconvergence_stack.pop()
+    warp.active_mask = state.original_mask
+    return True
+
+
+def _execute_branch(
+    device: Device,
+    sm: SM,
+    warp: WarpState,
+    instruction: Instruction,
+    program: Program,
+) -> None:
+    """Execute a BRA instruction.
+
+    ``BRA target`` is unconditional.  ``BRA target, condition`` is a divergent
+    branch.  ``BRA target, condition, reconvergence`` additionally supplies the
+    explicit join label needed for if/else lowering.
+    """
+    operands = instruction.operands
+    if not operands or not isinstance(operands[0], Label):
+        raise ValueError("BRA requires a label target")
+
+    target_pc = program.labels[operands[0].name]
+
+    if len(operands) == 1:
+        warp.pc = target_pc
+        return
+
+    condition_operand = operands[1]
+    taken_mask = 0
+    for lane in warp.active_lanes:
+        if _read_operand(device, sm, warp, lane, condition_operand) != 0:
+            taken_mask |= 1 << lane.lane_id
+
+    fallthrough_mask = warp.active_mask & ~taken_mask
+
+    if taken_mask == 0:
+        # No lane takes the branch; the fallthrough mask already equals the
+        # current active mask.  Advance PC directly because BRA does not fall
+        # through the normal per-instruction PC increment in execute_warp.
+        warp.pc += 1
+        return
+
+    if fallthrough_mask == 0:
+        # All active lanes take the branch.  No divergence state is needed.
+        warp.active_mask = taken_mask
+        warp.pc = target_pc
+        return
+
+    # Both sides are active.  The compiler must provide an explicit join label.
+    if len(operands) != 3 or not isinstance(operands[2], Label):
+        raise ValueError("divergent BRA requires a reconvergence label")
+
+    reconvergence_pc = program.labels[operands[2].name]
+    warp.reconvergence_stack.append(
+        ReconvergenceState(
+            pending_pc=warp.pc + 1,
+            pending_mask=fallthrough_mask,
+            reconvergence_pc=reconvergence_pc,
+            original_mask=warp.active_mask,
+        )
+    )
+    warp.active_mask = taken_mask
+    warp.pc = target_pc
+
+
+def _execute_compare(
+    device: Device,
+    sm: SM,
+    warp: WarpState,
+    lane: LaneState,
+    instruction: Instruction,
+    op: str,
+) -> None:
+    """Write a 1.0/0.0 predicate register from a lane comparison."""
+    if len(instruction.srcs) != 2:
+        raise ValueError(f"{op} requires two source operands")
+    a = _read_operand(device, sm, warp, lane, instruction.srcs[0])
+    b = _read_operand(device, sm, warp, lane, instruction.srcs[1])
+
+    condition = op[4:] if op.startswith("CMP.") else "EQ"
+    if condition == "EQ":
+        result = a == b
+    elif condition == "NE":
+        result = a != b
+    elif condition == "LT":
+        result = a < b
+    elif condition == "LE":
+        result = a <= b
+    elif condition == "GT":
+        result = a > b
+    elif condition == "GE":
+        result = a >= b
+    else:
+        raise ValueError(f"unsupported comparison: {op}")
+
+    _write_register(lane, instruction.dst, 1.0 if result else 0.0)
+
+
+def _execute_select(
+    device: Device,
+    sm: SM,
+    warp: WarpState,
+    lane: LaneState,
+    instruction: Instruction,
+) -> None:
+    """Implement ``SEL Rd, Rcond, Rtrue, Rfalse``."""
+    if len(instruction.srcs) != 3:
+        raise ValueError("SEL requires condition, true value, and false value")
+    condition = _read_operand(device, sm, warp, lane, instruction.srcs[0])
+    true_value = _read_operand(device, sm, warp, lane, instruction.srcs[1])
+    false_value = _read_operand(device, sm, warp, lane, instruction.srcs[2])
+    _write_register(
+        lane, instruction.dst, true_value if condition != 0 else false_value
+    )
+
+
 def execute_warp(
-    device: Device, sm: SM, warp: WarpState, instruction: Instruction
+    device: Device,
+    sm: SM,
+    warp: WarpState,
+    instruction: Instruction,
+    program: Program,
 ) -> None:
     """Execute one instruction for all active lanes in a warp.
 
@@ -298,7 +463,8 @@ def execute_warp(
         # block-scoped barrier with per-warp arrival masks.
         return
     if op == "BRA":
-        raise NotImplementedError("BRA is reserved for the control-flow milestone")
+        _execute_branch(device, sm, warp, instruction, program)
+        return
 
     for lane in warp.active_lanes:
         if op in {"LDG", "LDS"}:
@@ -361,6 +527,10 @@ def execute_warp(
                 )
                 value = _alu(op, a, b)
             _write_register(lane, instruction.dst, value)
+        elif op.startswith("CMP.") or op == "CMP":
+            _execute_compare(device, sm, warp, lane, instruction, op)
+        elif op == "SEL":
+            _execute_select(device, sm, warp, lane, instruction)
         else:
             raise NotImplementedError(f"opcode not implemented yet: {op}")
 
