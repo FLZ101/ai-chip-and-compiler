@@ -14,6 +14,7 @@ from .importer import (
     TorchMLIRImportResult,
 )
 from .mlir_builder import MLIRBuilder, MLIRBuilderError
+from .mgpu_to_isa import MGpuToIsaError, lower_mgpu_to_isa
 from .passes import DEFAULT_PASS_PIPELINE, Pass, PassPipeline
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "MLIRCanonicalizer",
     "MLIRBuilder",
     "MLIRBuilderError",
+    "MGpuToIsaError",
     "ONNXImportError",
     "ONNXImportResult",
     "ONNXImporter",
@@ -31,4 +33,5 @@ __all__ = [
     "TorchMLIRImportError",
     "TorchMLIRImporter",
     "TorchMLIRImportResult",
+    "lower_mgpu_to_isa",
 ]

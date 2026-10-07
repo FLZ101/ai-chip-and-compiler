@@ -55,6 +55,8 @@ Today `mgpu-opt` can:
 - run the `tile-linalg` pass to tile buffer-form linalg operations,
 - run the `map-to-mgpu` pass to map top-level loops to `mgpu.launch`,
 - run the `lower-to-mgpu` pass to insert shared memory/copy/barrier/mma ops,
+- run the `mgpu-to-isa` pass for supported vector-add and matmul launches,
+- lower generic `mgpu.*` launches to ISA mappings or placeholders,
 - run upstream passes such as `one-shot-bufferize`.
 
 The remaining project-specific lowering passes are implemented in later phases.
@@ -144,7 +146,9 @@ mgpu-opt input.mlir \
 
 The following passes will be implemented inside or invoked by `mgpu-opt`:
 
-- `mgpu-to-isa`
+The current remaining work is generalizing `mgpu-to-isa` beyond the supported
+vector-add launch and connecting the emitted `mgpu.isa` payload to the Python
+simulator runner.
 
 Each pass should have FileCheck tests in `tests/mlir/`.
 

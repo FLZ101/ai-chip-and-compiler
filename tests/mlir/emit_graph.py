@@ -29,6 +29,14 @@ def _matmul():
     return frontend.build()
 
 
+def _matmul_square():
+    frontend = ManualFrontend("matmul_square")
+    a = frontend.add_input("a", DType.F32, (4, 8))
+    b = frontend.add_input("b", DType.F32, (8, 4))
+    frontend.output(frontend.matmul(a, b))
+    return frontend.build()
+
+
 def _conv2d():
     frontend = ManualFrontend("conv2d")
     image = frontend.add_input("image", DType.F32, (1, 3, 8, 8))
@@ -80,6 +88,7 @@ def _pooling():
 CASES = {
     "vector_add": _vector_add,
     "matmul": _matmul,
+    "matmul_square": _matmul_square,
     "conv2d": _conv2d,
     "softmax": _softmax,
     "layernorm": _layernorm,

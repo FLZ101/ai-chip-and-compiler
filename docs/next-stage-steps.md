@@ -374,6 +374,10 @@ Tests:
 
 ### 3.6 Implement `mgpu-to-isa`
 
+Status: **done**
+
+Reference: [step-3.6.md](step-3.6.md)
+
 Emit ISA:
 
 - register allocation,

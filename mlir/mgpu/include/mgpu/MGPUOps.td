@@ -143,4 +143,11 @@ def MGPU_ReturnOp : MGPU_Op<"return", [Terminator]> {
   let assemblyFormat = "attr-dict";
 }
 
+def MGPU_IsaOp : MGPU_Op<"isa", []> {
+  let summary = "Container for simulator ISA emitted by mgpu-to-isa";
+  let arguments = (ins StrAttr:$code,
+                       StrAttr:$grid,
+                       StrAttr:$block);
+}
+
 #endif // MGPU_OPS
