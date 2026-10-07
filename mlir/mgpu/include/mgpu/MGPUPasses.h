@@ -6,6 +6,10 @@
 namespace mlir {
 namespace mgpu {
 
+/// Pass factory functions used by ``registerMGPUPasses``.
+std::unique_ptr<Pass> createTileLinalgPass();
+std::unique_ptr<Pass> createMapToMGPUPass();
+
 /// Register the target-specific MLIR passes used by mgpu-opt.
 void registerMGPUPasses();
 

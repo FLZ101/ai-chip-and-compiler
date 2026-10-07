@@ -339,6 +339,10 @@ Tests:
 
 ### 3.4 Implement grid/block/warp mapping
 
+Status: **done**
+
+Reference: [step-3.4.md](step-3.4.md)
+
 Lower loops to:
 
 - `mgpu.launch`,

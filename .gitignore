@@ -8,3 +8,4 @@ build/
 dist/
 .deps/
 compile_commands.json
+.cache/

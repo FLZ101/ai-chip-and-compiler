@@ -53,6 +53,7 @@ Today `mgpu-opt` can:
 - verify custom `mgpu.*` operations,
 - print the module back deterministically,
 - run the `tile-linalg` pass to tile buffer-form linalg operations,
+- run the `map-to-mgpu` pass to map top-level loops to `mgpu.launch`,
 - run upstream passes such as `one-shot-bufferize`.
 
 The remaining project-specific lowering passes are implemented in later phases.
@@ -142,10 +143,6 @@ mgpu-opt input.mlir \
 
 The following passes will be implemented inside or invoked by `mgpu-opt`:
 
-- `model-to-linalg`
-- `tile-linalg`
-- `one-shot-bufferize`
-- `map-to-mgpu`
 - `lower-to-mgpu`
 - `mgpu-to-isa`
 
@@ -181,7 +178,7 @@ Expected result: the module parses and prints successfully.
 
 ## 7. Current limitations
 
-- No lowering passes yet except `tile-linalg`.
+- No lowering passes yet except `tile-linalg` and `map-to-mgpu`.
 - Dimension attributes are numeric `I32Attr`, not symbolic `x`/`y`/`z`.
 - `mgpu.shared_alloc`, `mgpu.async_copy`, and `mgpu.mma` are defined but not
   lowered or executed yet.

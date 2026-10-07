@@ -2,6 +2,8 @@ add_mlir_dialect_library(MLIRMGPU
   MGPUDialect.cpp
   MGPUOps.cpp
   TileLinalgPass.cpp
+  MapToMGPUPass.cpp
+  MGPUPasses.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/mgpu
@@ -12,6 +14,7 @@ add_mlir_dialect_library(MLIRMGPU
 
   LINK_LIBS PUBLIC
   MLIRIR
+  MLIRArithDialect
   MLIRFuncDialect
   MLIRLinalgDialect
   MLIRLinalgTransforms

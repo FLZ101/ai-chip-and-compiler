@@ -80,6 +80,6 @@ struct TileLinalgPass
 
 } // namespace
 
-void mlir::mgpu::registerMGPUPasses() {
-  PassRegistration<TileLinalgPass>();
+std::unique_ptr<Pass> mlir::mgpu::createTileLinalgPass() {
+  return std::make_unique<TileLinalgPass>();
 }
