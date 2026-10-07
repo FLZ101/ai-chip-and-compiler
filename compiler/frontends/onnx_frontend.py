@@ -6,6 +6,7 @@ import numpy as np
 import onnx
 from onnx import numpy_helper
 
+from ..mlir.importer import ONNXImportResult, ONNXImporter
 from ..model_ir import DType, Graph
 from .manual_frontend import ManualFrontend
 
@@ -62,6 +63,15 @@ class ONNXFrontend:
             output_values.append(values[output.name])
         frontend.output(*output_values)
         return frontend.build()
+
+    def import_mlir(self, model: onnx.ModelProto) -> ONNXImportResult:
+        """Import an ONNX model through the real torch-mlir ONNX importer.
+
+        This is the Phase 2.2 entry point.  It avoids the manual per-op
+        :meth:`convert` path and returns parsed MLIR plus the ONNX
+        initializer/dynamic-input metadata needed by later lowering passes.
+        """
+        return ONNXImporter().import_model(model)
 
     def _convert_node(
         self,

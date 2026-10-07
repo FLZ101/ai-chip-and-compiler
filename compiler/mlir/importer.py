@@ -22,13 +22,21 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+import onnx
 import torch
+from torch_mlir.dialects import torch as torch_dialect
+from torch_mlir.extras import onnx_importer
 from torch_mlir import fx as torch_mlir_fx
 from torch_mlir.compiler_utils import OutputType
+from torch_mlir.ir import Context
 
 
 class TorchMLIRImportError(Exception):
     """Raised when a PyTorch program cannot be imported into MLIR."""
+
+
+class ONNXImportError(Exception):
+    """Raised when an ONNX model cannot be imported into MLIR."""
 
 
 @dataclass(frozen=True)
@@ -51,6 +59,26 @@ class TorchMLIRImportResult:
     parameter_map: dict[str, str] = field(default_factory=dict)
     buffer_map: dict[str, str] = field(default_factory=dict)
     constant_map: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ONNXImportResult:
+    """A parsed MLIR module produced by the real torch-mlir ONNX importer.
+
+    Attributes:
+        text: Stable MLIR text for the imported module.
+        initializer_names: ONNX initializer names preserved from the model.
+        dynamic_inputs: Non-initializer graph inputs mapped to their ONNX
+            dimensions.  Static dimensions are integers, dynamic dimensions are
+            the original ``dim_param`` strings, and unknown dimensions are
+            ``None``.
+        mlir_module: The in-memory ``torch_mlir.ir.Module``.
+    """
+
+    text: str
+    initializer_names: tuple[str, ...]
+    dynamic_inputs: dict[str, tuple[int | str | None, ...]]
+    mlir_module: Any = field(repr=False, compare=False)
 
 
 class TorchMLIRImporter:
@@ -146,6 +174,58 @@ class TorchMLIRImporter:
         )
 
 
+class ONNXImporter:
+    """Import an ONNX model into a real MLIR module with torch-mlir."""
+
+    def import_model(
+        self,
+        model: onnx.ModelProto,
+        *,
+        data_prop: bool = True,
+        verify: bool = True,
+    ) -> ONNXImportResult:
+        """Import ``model`` without manual per-op ONNX mapping.
+
+        ONNX shape inference is run first so dynamic dimensions and node result
+        types are available to torch-mlir.  Initializers are handled by the
+        importer's default ``elide_initialized_inputs`` behavior.
+        """
+        if model.graph is None:
+            raise ONNXImportError("ONNX model has no graph")
+
+        inferred_model = onnx.shape_inference.infer_shapes(
+            model,
+            data_prop=data_prop,
+        )
+        initializer_names = tuple(
+            initializer.name for initializer in inferred_model.graph.initializer
+        )
+        dynamic_inputs = _onnx_dynamic_inputs(inferred_model.graph, initializer_names)
+
+        context = Context()
+        torch_dialect.register_dialect(context)
+        config = onnx_importer.Config()
+        model_info = onnx_importer.ModelInfo(inferred_model, config=config)
+        module = model_info.create_module(context=context)
+        module_operation = module.operation
+        importer = onnx_importer.NodeImporter.define_function(
+            model_info.main_graph,
+            module_operation,
+        )
+        importer.import_all()
+
+        if verify:
+            module_operation.verify()
+        text = module_operation.get_asm(assume_verified=verify)
+
+        return ONNXImportResult(
+            text=text,
+            initializer_names=initializer_names,
+            dynamic_inputs=dynamic_inputs,
+            mlir_module=module,
+        )
+
+
 def _sanitize_identifier(name: str) -> str:
     """Return a legal MLIR symbol name derived from ``name``."""
     value = re.sub(r"[^A-Za-z0-9_$.-]", "_", name)
@@ -154,3 +234,26 @@ def _sanitize_identifier(name: str) -> str:
     if value[0].isdigit():
         value = f"_{value}"
     return value
+
+
+def _onnx_dynamic_inputs(
+    graph: onnx.GraphProto,
+    initializer_names: tuple[str, ...],
+) -> dict[str, tuple[int | str | None, ...]]:
+    """Return graph input dimensions after eliding initialized inputs."""
+    initializer_set = set(initializer_names)
+    result: dict[str, tuple[int | str | None, ...]] = {}
+    for graph_input in graph.input:
+        if graph_input.name in initializer_set:
+            continue
+        tensor_type = graph_input.type.tensor_type
+        dims: list[int | str | None] = []
+        for dim in tensor_type.shape.dim:
+            if dim.HasField("dim_value"):
+                dims.append(int(dim.dim_value))
+            elif dim.HasField("dim_param"):
+                dims.append(str(dim.dim_param))
+            else:
+                dims.append(None)
+        result[graph_input.name] = tuple(dims)
+    return result

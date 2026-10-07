@@ -227,6 +227,10 @@ Done when:
 
 ### 2.2 Import ONNX with torch-mlir/onnx-mlir
 
+Status: **done**
+
+Reference: [step-2.2.md](step-2.2.md)
+
 Implement:
 
 - ONNX to MLIR import,
