@@ -195,6 +195,52 @@ A kernel launch contains:
 
 The hardware distributes blocks across SMs. Blocks are independent, so the scheduler can run them in any order.
 
+### 4.4 Block vs warp
+
+A block is a programmer-visible group of threads. A warp is the hardware
+scheduling unit that executes those threads.
+
+```text
+grid
+ ├── block 0  -> SM
+ │    ├── warp 0: threads  0..31
+ │    ├── warp 1: threads 32..63
+ │    └── ...
+ ├── block 1  -> another SM
+ │    └── ...
+```
+
+Key rules:
+
+- A block is scheduled on one SM.
+- All threads in a block can share that SM's shared memory.
+- All threads in a block can synchronize with `BAR.SYNC`.
+- The hardware partitions the block's threads into warps, normally 32 threads
+  per warp.
+- For a block of `N` threads, the number of warps is:
+
+```text
+ceil(N / 32)
+```
+
+If `N` is not a multiple of 32, the last warp is partially filled. The missing
+lanes are masked inactive.
+
+For a 1D block:
+
+```text
+warp_id = tid.x // 32
+lane_id = tid.x % 32
+```
+
+So:
+
+- block = memory-sharing and synchronization group,
+- warp = lockstep execution group,
+- one block contains one or more warps,
+- different blocks do not share shared memory and do not synchronize with each
+  other.
+
 ---
 
 ## 5. Memory hierarchy and address spaces
@@ -237,6 +283,46 @@ Example uses:
 - Read-only during a kernel.
 - Optimized for uniform access and spatial locality.
 - Useful for weights and lookup tables.
+
+### 5.6 L1 and L2 caches are transparent
+
+In the normal GPU programming model, L1 and L2 caches are transparent to the
+programmer.
+
+The programmer does not:
+
+- allocate cache space,
+- choose which data goes into L1/L2,
+- explicitly flush or invalidate them for correctness,
+- address them directly.
+
+The hardware automatically manages:
+
+- cache allocation,
+- replacement policy,
+- hits and misses,
+- write-back/write-through behavior,
+- coherence.
+
+Programmers address only:
+
+- global memory,
+- shared memory,
+- registers,
+- local/constant memory.
+
+Caches are a performance detail, not a correctness-visible memory space.
+
+Performance is still affected by access patterns:
+
+- coalesced accesses use cache lines efficiently,
+- repeated accesses can hit L1/L2,
+- strided or random accesses may miss,
+- tiling can improve reuse.
+
+Some GPU ISAs also expose optional cache hints or prefetch instructions, such
+as `ld.global.ca`, `ld.global.cg`, and `ld.global.cs` in PTX. These are
+performance hints, not required for correct execution.
 
 ---
 
@@ -338,13 +424,13 @@ At the end of a kernel, all writes must be visible to the host before the host r
 
 ### 9.3 Async copy
 
-Modern GPUs can copy global memory to shared memory asynchronously while computation continues. The minimal compiler can later use an `mgpu.async_copy` op for this.
+Modern GPUs can copy global memory to shared memory asynchronously while computation continues. Compilers often expose this as an asynchronous-copy instruction or intrinsic.
 
 ---
 
 ## 10. Minimal simulator mapping
 
-The current project starts with a simplified version of this model:
+The simulator maps modern GPU concepts to the following abstractions:
 
 | Modern GPU concept | Minimal simulator equivalent |
 | --- | --- |
@@ -358,17 +444,10 @@ The current project starts with a simplified version of this model:
 | Thread/block/grid IDs | special registers: `tid.x/y/z`, `ntid.x/y/z`, `ctaid.x/y/z`, `nctaid.x/y/z` |
 | Warp scheduler | deterministic cycle loop in `Device.run` |
 | SIMT execution | one instruction applied to all `active_lanes` |
-| Tensor core | reserved `MMA` instruction, not yet implemented |
+| Tensor core | reserved `MMA` instruction |
 
-The current MVP intentionally uses:
-
-- one warp per SM,
-- one block per SM,
-- no branch divergence yet,
-- no real block barrier yet,
-- no timing stalls or cache model yet.
-
-Those simplifications keep the first vertical slice small while preserving the interfaces needed to grow into the full model described here.
+This table describes the intended conceptual mapping without freezing the
+implementation status in this reference document.
 
 ---
 
@@ -391,7 +470,77 @@ The hardware model in this document therefore directly influences the compiler's
 
 ---
 
-## 12. Reference glossary
+## 12. Programming best practices
+
+These guidelines apply to both hand-written GPU kernels and the code generated
+by the MLIR compiler.
+
+### 12.1 Keep enough parallelism
+
+- Launch enough thread blocks to fill all SMs.
+- Choose block sizes as multiples of 32.
+- Avoid blocks that are too small because they waste scheduling slots.
+- Avoid blocks that are too large if they reduce occupancy through excessive
+  register or shared-memory use.
+
+### 12.2 Make global-memory access coalesced
+
+- Adjacent lanes in a warp should access adjacent addresses.
+- Prefer contiguous layouts for the innermost loop.
+- Use vectorized loads and stores where possible.
+- Keep data in registers once loaded.
+
+### 12.3 Minimize divergence
+
+- Avoid data-dependent branches in hot loops.
+- Prefer arithmetic or `SEL` over divergent `if/else`.
+- If branching is necessary, make branches uniform across the whole warp.
+
+### 12.4 Use shared memory for reuse
+
+- Tile matrix multiplication, convolution, and attention.
+- Load a tile into shared memory once and reuse it many times.
+- Use `BAR.SYNC` to make shared-memory writes visible to the block.
+- Pad shared-memory layouts to avoid bank conflicts.
+
+### 12.5 Reduce memory traffic
+
+- Keep frequently reused values in registers.
+- Prefer shared memory over global memory for inter-thread reuse.
+- Fuse elementwise operations with producers/consumers when possible.
+- Prefetch the next tile while computing the current tile.
+
+### 12.6 Use tensor cores for matrix-heavy work
+
+- Map matmul, convolution-as-GEMM, and attention score/projection steps to
+  tensor-core operations when available.
+- Stage matrix tiles in shared memory.
+- Use wider matrix tiles to amortize overhead.
+
+### 12.7 Use numerically stable reductions
+
+- Use online max/sum for softmax.
+- Use two-pass or Welford-style reductions for mean and variance.
+- Prefer tree reductions in shared memory.
+- Keep accumulation in a wider type when available.
+
+### 12.8 Use synchronization only when necessary
+
+- Insert barriers only where shared memory is reused or inter-thread ordering
+  is required.
+- Avoid barriers inside divergent code.
+- Let independent warps proceed so the scheduler can hide latency.
+
+### 12.9 Profile, then optimize
+
+- Measure cycles, memory traffic, occupancy, and stall reasons.
+- Optimize the actual bottleneck rather than guessing.
+- The simulator should eventually report cache hits, bank conflicts, and
+  stall reasons to support this workflow.
+
+---
+
+## 13. Reference glossary
 
 - **SM:** streaming multiprocessor.
 - **SIMT:** single instruction, multiple threads.
