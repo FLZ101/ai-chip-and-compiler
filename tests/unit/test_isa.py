@@ -10,7 +10,7 @@ class TestIsaParser(unittest.TestCase):
         # This is the first real ISA program.  It multiplies the thread id by 4
         # bytes, loads two floats, adds them, stores the result, and exits.
         program = parse_asm("""
-            MUL R0, tid, 4
+            MUL R0, tid.x, 4
             LDG R1, [R0]
             LDG R2, [R0 + 4096]
             ADD R3, R1, R2
@@ -20,7 +20,7 @@ class TestIsaParser(unittest.TestCase):
 
         self.assertEqual(len(program), 6)
         self.assertEqual(program[0].op, "MUL")
-        self.assertEqual(program[0].operands, (Reg("R0"), Reg("tid"), Imm(4)))
+        self.assertEqual(program[0].operands, (Reg("R0"), Reg("tid.x"), Imm(4)))
         self.assertEqual(program[1].operands, (Reg("R1"), Mem("R0", 0)))
         self.assertEqual(program[2].operands, (Reg("R2"), Mem("R0", 4096)))
         self.assertEqual(program[4].operands, (Mem("R0", 8192), Reg("R3")))
@@ -43,7 +43,7 @@ class TestIsaParser(unittest.TestCase):
         # Round-tripping through the formatter must produce the same program.
         # This guarantees the MLIR backend can emit and reload ISA text later.
         asm = """
-        MOV R0, tid
+        MOV R0, tid.x
         MUL R1, R0, 4
         LDG R2, [R1 + 8]
         ADD R3, R2, 1
@@ -73,7 +73,7 @@ class TestIsaParser(unittest.TestCase):
 
     def test_parse_conditional_branch_and_compare(self):
         program = parse_asm("""
-            CMP.LT R0, tid, 4
+            CMP.LT R0, tid.x, 4
             BRA else, R0, end
             MOV R1, 1
             BRA end
@@ -94,6 +94,21 @@ class TestIsaParser(unittest.TestCase):
     def test_rejects_undefined_branch_label(self):
         with self.assertRaises(ValueError):
             parse_asm("BRA missing")
+
+    def test_parse_3d_special_registers(self):
+        program = parse_asm("""
+            MOV R0, ctaid.x
+            MOV R1, ctaid.y
+            MOV R2, ctaid.z
+            MOV R3, tid.x
+            MOV R4, nctaid.x
+            MOV R5, ntid.x
+            """)
+
+        self.assertEqual(
+            [instr.operands[1].name for instr in program],
+            ["ctaid.x", "ctaid.y", "ctaid.z", "tid.x", "nctaid.x", "ntid.x"],
+        )
 
 
 if __name__ == "__main__":

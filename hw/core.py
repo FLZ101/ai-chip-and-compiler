@@ -9,10 +9,18 @@ from .isa import Imm, Instruction, Label, Mem, Program, Reg
 from .memory import ByteMemory, RegisterFile, as_int
 
 SPECIAL_REGISTER_NAMES = {
-    "tid",
-    "ntid",
-    "ctaid",
-    "nctaid",
+    "tid.x",
+    "tid.y",
+    "tid.z",
+    "ntid.x",
+    "ntid.y",
+    "ntid.z",
+    "ctaid.x",
+    "ctaid.y",
+    "ctaid.z",
+    "nctaid.x",
+    "nctaid.y",
+    "nctaid.z",
     "laneid",
     "warpid",
     "clock",
@@ -36,9 +44,9 @@ class LaneState:
 class WarpState:
     """State for a 32-lane warp.
 
-    ``active_mask`` is the SIMT execution mask.  The MVP does not yet implement
-    branch reconvergence, but the mask is already the seam where that behavior
-    will be added.
+    ``active_mask`` is the SIMT execution mask.  Branch reconvergence was added
+    in step 002, and ``waiting_at_barrier`` is used by block barriers in step
+    003.
     """
 
     warp_id: int
@@ -47,6 +55,7 @@ class WarpState:
     exited: bool = False
     active_mask: int = 0xFFFFFFFF
     reconvergence_stack: list["ReconvergenceState"] = field(default_factory=list)
+    waiting_at_barrier: bool = False
 
     @property
     def active_lanes(self) -> list[LaneState]:
@@ -78,8 +87,7 @@ class ReconvergenceState:
 class SM:
     """Streaming multiprocessor.
 
-    Each SM owns private shared memory and zero or more resident warps.  The
-    first MVP only keeps one warp per SM to simplify scheduling.
+    Each SM owns private shared memory and zero or more resident warps.
     """
 
     sm_id: int
@@ -101,14 +109,14 @@ class Device:
 
     def run(self, program: Program) -> None:
         # A single global cycle loop is the simplest deterministic scheduler.
-        # It advances every non-exited warp once per cycle.  A future timing
-        # model will replace this with issue, memory, and barrier stalls.
+        # It advances every ready warp once per cycle.  A future timing model
+        # will replace this with issue, memory, and explicit barrier stalls.
         while True:
             self.clock += 1
             for sm in self.sms:
                 sm.clock = self.clock
                 for warp in sm.warps:
-                    if warp.exited:
+                    if warp.exited or warp.waiting_at_barrier:
                         continue
                     # A warp may arrive at a reconvergence label from either
                     # side of a divergent branch.  Resolve those stack
@@ -169,11 +177,21 @@ def launch(
     for block_linear_id in range(total_blocks):
         sm = device.sms[block_linear_id]
         sm.warps = []
-        lanes = _make_lanes(block_threads)
-        warp = WarpState(warp_id=0, lanes=lanes)
-        sm.warps.append(warp)
-        # Record the block this SM is executing.  The MVP uses one warp and
-        # one block per SM, so special register evaluation can stay simple.
+        # A real GPU groups the threads of each block into 32-lane warps.  The
+        # final warp may be partially populated, and its active mask covers only
+        # the lanes that exist.
+        for warp_index in range(math.ceil(block_threads / 32)):
+            lane_count = min(32, block_threads - warp_index * 32)
+            lanes = _make_lanes(lane_count)
+            active_mask = (1 << lane_count) - 1
+            warp = WarpState(
+                warp_id=warp_index,
+                lanes=lanes,
+                active_mask=active_mask,
+            )
+            sm.warps.append(warp)
+        # Record the block this SM is executing.  Special register evaluation
+        # uses these values to derive global thread IDs.
         sm._block_idx = _unflatten_index(block_linear_id, grid_dim)  # type: ignore[attr-defined]
         sm._block_linear_id = block_linear_id  # type: ignore[attr-defined]
 
@@ -199,30 +217,36 @@ def _special_register_value(
         return lane.lane_id
     if name == "warpid":
         return warp.warp_id
-    if name == "tid":
-        # tid is the global thread index for the launched grid.  For one warp
-        # per block, this is the block's first thread plus the lane id.
+    if name in {"tid.x", "tid.y", "tid.z"}:
         block_linear_id = getattr(sm, "_block_linear_id", 0)
-        return block_linear_id * math.prod(device.block_dim) + lane.lane_id
-    if name == "ntid":
-        return math.prod(device.block_dim)
-    if name == "ctaid":
-        return _flatten_index(getattr(sm, "_block_idx", (0,)), device.grid_dim)
-    if name == "nctaid":
-        return math.prod(device.grid_dim)
+        block_threads = math.prod(device.block_dim)
+        global_thread_id = (
+            block_linear_id * block_threads + warp.warp_id * 32 + lane.lane_id
+        )
+        block_local_thread_id = global_thread_id % block_threads
+        thread_idx = _unflatten_index(block_local_thread_id, device.block_dim)
+        return _component_or_default(thread_idx, _dimension_index(name), 0)
+    if name in {"ntid.x", "ntid.y", "ntid.z"}:
+        return _component_or_default(device.block_dim, _dimension_index(name), 1)
+    if name in {"ctaid.x", "ctaid.y", "ctaid.z"}:
+        block_idx = getattr(sm, "_block_idx", (0,))
+        return _component_or_default(block_idx, _dimension_index(name), 0)
+    if name in {"nctaid.x", "nctaid.y", "nctaid.z"}:
+        return _component_or_default(device.grid_dim, _dimension_index(name), 1)
     if name == "clock":
         return device.clock
     raise ValueError(f"unknown special register: {name}")
 
 
-def _flatten_index(index: tuple[int, ...], shape: tuple[int, ...]) -> int:
-    # Convert a multi-dimensional index to its linear form in row-major order.
-    value = 0
-    stride = 1
-    for idx, dim in zip(reversed(index), reversed(shape)):
-        value += idx * stride
-        stride *= dim
-    return value
+def _component_or_default(values: tuple[int, ...], dimension: int, default: int) -> int:
+    """Return ``values[dimension]`` or a default for omitted dimensions."""
+    if dimension < len(values):
+        return values[dimension]
+    return default
+
+
+def _dimension_index(name: str) -> int:
+    return {"x": 0, "y": 1, "z": 2}[name[-1]]
 
 
 def _read_operand(
@@ -436,6 +460,20 @@ def _execute_select(
     )
 
 
+def _execute_barrier(sm: SM, warp: WarpState) -> None:
+    """Implement a block-scoped ``BAR.SYNC``.
+
+    A warp marks itself waiting and stalls.  When the last warp in the block
+    arrives, all waiting warps are released and advance past the barrier.
+    """
+    warp.waiting_at_barrier = True
+
+    if all(w.waiting_at_barrier for w in sm.warps):
+        for waiting_warp in sm.warps:
+            waiting_warp.waiting_at_barrier = False
+            waiting_warp.pc += 1
+
+
 def execute_warp(
     device: Device,
     sm: SM,
@@ -458,9 +496,7 @@ def execute_warp(
         warp.exited = True
         return
     if op == "BAR.SYNC":
-        # All warps in this MVP block execute on the same SM and there is one
-        # warp per block.  In the real implementation this becomes a
-        # block-scoped barrier with per-warp arrival masks.
+        _execute_barrier(sm, warp)
         return
     if op == "BRA":
         _execute_branch(device, sm, warp, instruction, program)

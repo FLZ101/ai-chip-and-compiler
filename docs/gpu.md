@@ -124,7 +124,7 @@ Each lane operates on its own register file.
 When a warp encounters a branch such as:
 
 ```c
-if (tid % 2 == 0) {
+if (tid.x % 2 == 0) {
     A();
 } else {
     B();
@@ -169,12 +169,19 @@ Common indexing terms:
 
 | Special value | Meaning |
 | --- | --- |
-| `threadIdx` / `tid` | thread index within its block |
-| `blockIdx` / `ctaid` | block index within the grid |
-| `blockDim` / `ntid` | number of threads in a block |
-| `gridDim` / `nctaid` | number of blocks in the grid |
+| `threadIdx.x/y/z` / `tid.x/y/z` | thread index within its block |
+| `blockIdx.x/y/z` / `ctaid.x/y/z` | block index within the grid |
+| `blockDim.x/y/z` / `ntid.x/y/z` | number of threads in a block dimension |
+| `gridDim.x/y/z` / `nctaid.x/y/z` | number of blocks in a grid dimension |
 
 These values are exposed to ISA code as special registers.
+
+The minimal ISA exposes the 3D forms directly:
+
+```text
+ctaid.x/y/z      nctaid.x/y/z
+tid.x/y/z        ntid.x/y/z
+```
 
 ### 4.3 Launch model
 
@@ -348,7 +355,7 @@ The current project starts with a simplified version of this model:
 | Thread | `LaneState` |
 | Warp | `WarpState` |
 | SM | `SM` |
-| Thread/block/grid IDs | special registers: `tid`, `ntid`, `ctaid`, `nctaid` |
+| Thread/block/grid IDs | special registers: `tid.x/y/z`, `ntid.x/y/z`, `ctaid.x/y/z`, `nctaid.x/y/z` |
 | Warp scheduler | deterministic cycle loop in `Device.run` |
 | SIMT execution | one instruction applied to all `active_lanes` |
 | Tensor core | reserved `MMA` instruction, not yet implemented |

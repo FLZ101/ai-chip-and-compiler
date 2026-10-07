@@ -1,8 +1,9 @@
 # Step 001: First Simulator Vertical Slice
 
 This document describes the first implemented vertical slice in the repository.
-Step 002 (branches, divergence, and reconvergence) is now also implemented and
-is described in [step-002.md](step-002.md).
+Step 002 (branches, divergence, and reconvergence) and Step 003 (block barriers
+and multi-warp scheduling) are now also implemented. They are described in
+[step-002.md](step-002.md) and [step-003.md](step-003.md).
 
 The first milestone is intentionally narrow: prove that we can parse a small GPU ISA, model global/shared memory, execute a simple SIMT warp, and run an end-to-end vector-add program against a deterministic simulator.
 
@@ -35,8 +36,10 @@ Supported opcode groups:
 
 Special registers:
 
-- `tid`, `ntid`
-- `ctaid`, `nctaid`
+- `tid.x`, `tid.y`, `tid.z`
+- `ntid.x`, `ntid.y`, `ntid.z`
+- `ctaid.x`, `ctaid.y`, `ctaid.z`
+- `nctaid.x`, `nctaid.y`, `nctaid.z`
 - `laneid`, `warpid`
 - `clock`
 
@@ -100,7 +103,7 @@ File: [../tests/operator_e2e/test_vector_add_e2e.py](../tests/operator_e2e/test_
 The first full test executes this ISA program:
 
 ```asm
-MUL R0, tid, 4
+MUL R0, tid.x, 4
 LDG R1, [R0]
 LDG R2, [R0 + 4096]
 ADD R3, R1, R2
@@ -169,11 +172,9 @@ python -m pip install -e '.[dev]'
 
 ## 5. What is intentionally not implemented yet
 
-The current simulator is the first vertical slice plus branch support. It does
-not yet include:
+The current simulator is the first vertical slice plus branch, barrier, and
+multi-warp support. It does not yet include:
 
-- a real block-scoped barrier,
-- multiple warps per SM,
 - multiple blocks per SM over time,
 - L1/L2 cache modeling,
 - memory latency and bandwidth,

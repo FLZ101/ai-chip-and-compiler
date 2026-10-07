@@ -13,10 +13,18 @@ from typing import Iterable
 # Registers whose value is provided by the GPU scheduler rather than by a
 # kernel instruction.  They are read-only from the perspective of ISA code.
 SPECIAL_REGISTERS = {
-    "tid",
-    "ntid",
-    "ctaid",
-    "nctaid",
+    "tid.x",
+    "tid.y",
+    "tid.z",
+    "ntid.x",
+    "ntid.y",
+    "ntid.z",
+    "ctaid.x",
+    "ctaid.y",
+    "ctaid.z",
+    "nctaid.x",
+    "nctaid.y",
+    "nctaid.z",
     "laneid",
     "warpid",
     "clock",
@@ -69,7 +77,7 @@ CONTROL_OPS = {"BRA", "RET", "EXIT", "BAR.SYNC"}
 
 @dataclass(frozen=True)
 class Reg:
-    """A named register operand such as R0, tid, or laneid."""
+    """A named register operand such as R0, tid.x, or laneid."""
 
     name: str
 

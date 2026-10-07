@@ -6,7 +6,7 @@ from hw.isa import parse_asm
 # A handwritten vector-add kernel.  Each thread handles one FP32 element using
 # byte addresses: input A starts at 0, input B at 4096, and output at 8192.
 VECTOR_ADD_ASM = """
-MUL R0, tid, 4
+MUL R0, tid.x, 4
 LDG R1, [R0]
 LDG R2, [R0 + 4096]
 ADD R3, R1, R2

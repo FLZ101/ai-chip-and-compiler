@@ -4,8 +4,8 @@ from hw.device import create_device, launch
 from hw.isa import parse_asm
 
 IF_ELSE_ASM = """
-MUL R4, tid, 4
-MOV R0, tid
+MUL R4, tid.x, 4
+MOV R0, tid.x
 MOV R1, 4
 CMP.LT R2, R0, R1
 BRA else, R2, end
@@ -22,8 +22,8 @@ EXIT
 
 
 NESTED_DIVERGENCE_ASM = """
-MUL R4, tid, 4
-MOV R0, tid
+MUL R4, tid.x, 4
+MOV R0, tid.x
 MOV R1, 6
 CMP.LT R2, R0, R1
 BRA inner, R2, end_outer

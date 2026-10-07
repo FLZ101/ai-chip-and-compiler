@@ -80,6 +80,8 @@ Exit criteria:
 
 ## Step 003: Block barriers and multi-warp scheduling
 
+Status: **done**
+
 Goal:
 
 - Add real block synchronization and allow more than one warp per SM.

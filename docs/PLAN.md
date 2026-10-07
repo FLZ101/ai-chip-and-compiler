@@ -217,7 +217,7 @@ Instruction groups:
 - Control: `BRA`, `RET`, `EXIT`, `BAR.SYNC`.
 - Tensor: `MMA.16x16x16.f32`.
 - Address spaces: global, shared, local, constant.
-- Special registers: `tid`, `ntid`, `ctaid`, `nctaid`, `laneid`, `warpid`, `clock`.
+- Special registers: `tid.x/y/z`, `ntid.x/y/z`, `ctaid.x/y/z`, `nctaid.x/y/z`, `laneid`, `warpid`, `clock`.
 
 These instructions cover:
 
