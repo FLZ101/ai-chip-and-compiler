@@ -6,6 +6,7 @@ from typing import Any
 
 from ..model_ir import Graph, Op
 from .activation_kernels import lower_activation_kernel
+from .attention_kernels import lower_attention_kernel
 from .cnn_kernels import lower_cnn_kernel
 from .common_kernels import lower_common_kernel
 from .norm_detection_kernels import lower_norm_detection_kernel
@@ -61,4 +62,13 @@ def lower_kernel(
         Op.RMS_NORM,
     }:
         return lower_transformer_kernel(graph, mlir_text, layout)
+    if node.op in {
+        Op.ROPE,
+        Op.CAUSAL_MASK,
+        Op.SCALED_DOT_PRODUCT_ATTENTION,
+        Op.MASKED_ATTENTION,
+        Op.KV_CACHE_APPEND,
+        Op.KV_CACHE_GATHER,
+    }:
+        return lower_attention_kernel(graph, mlir_text, layout)
     return lower_common_kernel(graph, mlir_text, layout)

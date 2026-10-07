@@ -377,6 +377,8 @@ Reference:
 
 ## Step 013: Attention, RoPE, and KV-cache
 
+Status: **done**
+
 Goal:
 
 - Run small Transformer attention blocks.
@@ -397,6 +399,10 @@ Initial strategy:
 Exit criteria:
 
 - Attention and KV-cache E2E tests pass.
+
+Reference:
+
+- [step-013.md](step-013.md)
 
 ---
 

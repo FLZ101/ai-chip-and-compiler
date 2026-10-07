@@ -194,6 +194,15 @@ class MLIRBuilder:
         }:
             return self._emit_transformer_placeholder(node, result_name, indent)
         if node.op in {
+            Op.ROPE,
+            Op.CAUSAL_MASK,
+            Op.SCALED_DOT_PRODUCT_ATTENTION,
+            Op.MASKED_ATTENTION,
+            Op.KV_CACHE_APPEND,
+            Op.KV_CACHE_GATHER,
+        }:
+            return self._emit_attention_placeholder(node, result_name, indent)
+        if node.op in {
             Op.RELU,
             Op.LEAKY_RELU,
             Op.SILU,
@@ -502,6 +511,36 @@ class MLIRBuilder:
         iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
         return [
             f"{indent}// Transformer norm/softmax op is lowered by mgpu-to-isa; "
+            "linalg identity is a placeholder.",
+            f"{indent}{result_name} = linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {identity}]",
+            f"{indent}  iterator_types = [{iterator_types}]",
+            f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
+            f"outs({result_name} : {out_type}) {{",
+            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+            f"{indent}  linalg.yield %in : {scalar_type}",
+            f"{indent}}} -> {out_type}",
+        ]
+
+    def _emit_attention_placeholder(
+        self, node: Node, result_name: str, indent: str
+    ) -> list[str]:
+        value = node.inputs[0] if node.inputs else None
+        output = node.outputs[0]
+        scalar_type = self._scalar_type(output.dtype)
+        value_type = self._memref_type(value) if value is not None else "memref<f32>"
+        out_type = self._memref_type(output)
+        dims = ", ".join(f"d{axis}" for axis in range(output.rank))
+        identity = f"affine_map<({dims}) -> ({dims})>"
+        iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
+        if value is None:
+            return [
+                f"{indent}// Attention/sequence op is lowered by mgpu-to-isa; "
+                "placeholder output.",
+                f"{indent}{result_name} = memref.alloc() : {out_type}",
+            ]
+        return [
+            f"{indent}// Attention/sequence op is lowered by mgpu-to-isa; "
             "linalg identity is a placeholder.",
             f"{indent}{result_name} = linalg.generic {{",
             f"{indent}  indexing_maps = [{identity}, {identity}]",
