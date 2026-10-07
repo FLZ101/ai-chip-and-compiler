@@ -133,6 +133,33 @@ class TorchFXFrontend:
             )
         if isinstance(module, nn.ReLU):
             return frontend.relu(self._resolve_arg(node.args[0], values))
+        if isinstance(module, nn.Conv2d):
+            x = self._resolve_arg(node.args[0], values)
+            weight = self._add_param_input(
+                frontend, f"{node.target}_weight", module.weight
+            )
+            bias = None
+            if module.bias is not None:
+                bias = self._add_param_input(
+                    frontend, f"{node.target}_bias", module.bias
+                )
+            return frontend.conv2d(
+                x,
+                weight,
+                bias,
+                strides=module.stride,
+                padding=module.padding,
+                dilation=module.dilation,
+                groups=module.groups,
+            )
+        if isinstance(module, nn.MaxPool2d):
+            x = self._resolve_arg(node.args[0], values)
+            return frontend.max_pool2d(
+                x,
+                kernel=module.kernel_size,
+                strides=module.stride,
+                padding=module.padding,
+            )
         raise TorchFXFrontendError(f"unsupported FX module: {type(module).__name__}")
 
     def _convert_call_method(
