@@ -26,6 +26,17 @@ class TestTypedMemory(unittest.TestCase):
         memory.write_i32(0, -123456)
         self.assertEqual(memory.read_i32(0), -123456)
 
+    def test_i4_and_u4_packed_round_trip(self):
+        memory = ByteMemory(8)
+        values = [-8, -1, 0, 7, 0, 1, 8, 15]
+        for addr, value in enumerate(values[:4]):
+            memory.write_i4(addr, value)
+        for addr, value in enumerate(values[4:]):
+            memory.write_u4(addr + 4, value)
+
+        self.assertEqual([memory.read_i4(addr) for addr in range(4)], values[:4])
+        self.assertEqual([memory.read_u4(addr) for addr in range(4, 8)], values[4:])
+
     def test_typed_accesses_check_bounds(self):
         memory = ByteMemory(4)
         with self.assertRaises(MemoryError):

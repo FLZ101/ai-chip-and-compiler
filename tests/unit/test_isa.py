@@ -51,11 +51,22 @@ class TestIsaParser(unittest.TestCase):
             STS.U8 [R3], R2
             LDG.I32 R4, [R5]
             STG.I32 [R5], R4
+            LDG.I4 R6, [R7]
+            STG.U4 [R7], R6
         """)
 
         self.assertEqual(
             [instr.op for instr in program],
-            ["LDG.F16", "STG.BF16", "LDS.I8", "STS.U8", "LDG.I32", "STG.I32"],
+            [
+                "LDG.F16",
+                "STG.BF16",
+                "LDS.I8",
+                "STS.U8",
+                "LDG.I32",
+                "STG.I32",
+                "LDG.I4",
+                "STG.U4",
+            ],
         )
 
     def test_round_trip(self):

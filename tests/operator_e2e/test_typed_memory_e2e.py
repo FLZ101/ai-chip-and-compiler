@@ -44,6 +44,25 @@ class TestTypedMemoryEndToEnd(unittest.TestCase):
             [0, 1, 2, 3],
         )
 
+    def test_i4_packed_store_executes_in_simulator(self):
+        device = create_device(global_size=1 << 20, sm_count=4)
+        launch(
+            device,
+            parse_asm("""
+                MOV R0, tid.x
+                MOV R1, tid.x
+                STG.I4 [R0], R1
+                EXIT
+                """),
+            grid_dim=(1,),
+            block_dim=(4,),
+        )
+
+        self.assertEqual(
+            [device.global_memory.read_i4(addr) for addr in range(4)],
+            [0, 1, 2, 3],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

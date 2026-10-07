@@ -85,6 +85,44 @@ class ByteMemory:
         self.check(addr, 4)
         struct.pack_into("<i", self.data, addr, value)
 
+    def read_i4(self, addr: int) -> int:
+        self._check_nibble_addr(addr)
+        byte = self.data[addr // 2]
+        value = (byte >> (4 * (addr % 2))) & 0xF
+        return value - 16 if value & 0x8 else value
+
+    def write_i4(self, addr: int, value: int) -> None:
+        self._check_nibble_addr(addr)
+        if not -8 <= int(value) <= 7:
+            raise MemoryError(f"i4 value out of range: {value!r}")
+        byte_addr = addr // 2
+        shift = 4 * (addr % 2)
+        mask = 0xF << shift
+        packed = (int(value) & 0xF) << shift
+        self.data[byte_addr] = (self.data[byte_addr] & ~mask) | packed
+
+    def read_u4(self, addr: int) -> int:
+        self._check_nibble_addr(addr)
+        byte = self.data[addr // 2]
+        return (byte >> (4 * (addr % 2))) & 0xF
+
+    def write_u4(self, addr: int, value: int) -> None:
+        self._check_nibble_addr(addr)
+        if not 0 <= int(value) <= 15:
+            raise MemoryError(f"u4 value out of range: {value!r}")
+        byte_addr = addr // 2
+        shift = 4 * (addr % 2)
+        mask = 0xF << shift
+        packed = (int(value) & 0xF) << shift
+        self.data[byte_addr] = (self.data[byte_addr] & ~mask) | packed
+
+    def _check_nibble_addr(self, addr: int) -> None:
+        if addr < 0 or addr // 2 >= len(self.data):
+            raise MemoryError(
+                f"{self.name} nibble access out of bounds: addr={addr}, "
+                f"capacity={len(self.data) * 2} nibbles"
+            )
+
     def read_u32(self, addr: int) -> int:
         self.check(addr, 4)
         return struct.unpack_from("<I", self.data, addr)[0]

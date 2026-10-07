@@ -725,6 +725,10 @@ def _read_typed(memory: ByteMemory, dtype: str, addr: int) -> int | float:
         return memory.read_i8(addr)
     if dtype == "U8":
         return memory.read_u8(addr)
+    if dtype == "I4":
+        return memory.read_i4(addr)
+    if dtype == "U4":
+        return memory.read_u4(addr)
     if dtype == "I32":
         return memory.read_i32(addr)
     raise NotImplementedError(f"unsupported memory type: {dtype}")
@@ -741,6 +745,10 @@ def _write_typed(memory: ByteMemory, dtype: str, addr: int, value: int | float) 
         memory.write_i8(addr, int(value))
     elif dtype == "U8":
         memory.write_u8(addr, int(value))
+    elif dtype == "I4":
+        memory.write_i4(addr, int(value))
+    elif dtype == "U4":
+        memory.write_u4(addr, int(value))
     elif dtype == "I32":
         memory.write_i32(addr, int(value))
     else:

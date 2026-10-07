@@ -73,6 +73,10 @@ REGISTER_DEST_OPS = {
     "LDS.I8",
     "LDG.U8",
     "LDS.U8",
+    "LDG.I4",
+    "LDS.I4",
+    "LDG.U4",
+    "LDS.U4",
     "LDG.I32",
     "LDS.I32",
 }
@@ -91,6 +95,10 @@ MEMORY_DEST_OPS = {
     "STS.I8",
     "STG.U8",
     "STS.U8",
+    "STG.I4",
+    "STS.I4",
+    "STG.U4",
+    "STS.U4",
     "STG.I32",
     "STS.I32",
 }
