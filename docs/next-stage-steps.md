@@ -1,0 +1,553 @@
+# Detailed Steps for the Production MLIR Stage
+
+This document turns the next-stage plan into concrete, ordered engineering
+steps.
+
+The steps are grouped by phase.  Steps inside a phase are ordered; later phases
+depend on earlier phases.  Each step lists the files/modules involved, the
+required implementation, tests, and a completion condition.
+
+---
+
+## Phase 0: Real MLIR Toolchain
+
+### 0.1 Choose the MLIR integration model
+
+Decide between:
+
+- a C++ MLIR/LLVM build with `mgpu-opt` and `mgpu-translate`, or
+- Python bindings provided by `torch-mlir`/`mlir-python`.
+
+Recommendation:
+
+- start with Python bindings for fast iteration,
+- add a C++ tool later for production passes.
+
+Files:
+
+- `pyproject.toml`
+- `compiler/mlir/toolchain.md` (new)
+
+Tests:
+
+- document the choice and runtime requirements.
+
+Done when:
+
+- the toolchain can import `torch_mlir` and parse standard MLIR.
+
+### 0.2 Build a real `mgpu` dialect
+
+Convert `compiler/mlir/mgpu_dialect.td` into a compiled dialect.
+
+Implement:
+
+- dialect registration,
+- op declarations/definitions,
+- verifiers,
+- parsers/printers,
+- canonicalization hooks.
+
+Files:
+
+- `compiler/mlir/mgpu_dialect.td`
+- C++ or Python dialect sources
+
+Tests:
+
+- parse `mgpu.launch`
+- parse `mgpu.thread_id`
+- parse `mgpu.barrier`
+- reject malformed ops
+
+Done when:
+
+- `mgpu.*` ops round-trip through MLIR parse/print.
+
+### 0.3 Add a real MLIR test harness
+
+Replace text-only Python checks with actual MLIR parse/verify tests.
+
+Implement:
+
+- `mgpu-opt` or Python equivalent,
+- `lit` config for MLIR passes,
+- FileCheck tests for pass output.
+
+Files:
+
+- `tests/mlir/`
+- `tools/mgpu_opt.py` or CMake target
+
+Done when:
+
+- `lit` parses and verifies every existing `.mlir` test.
+
+---
+
+## Phase 1: Type and Memory Legalization
+
+### 1.1 Define the complete MLIR type map
+
+Implement mappings for:
+
+- `f32`
+- `f16`
+- `bf16`
+- `f8E4M3FN`
+- `f8E5M2`
+- `i8`
+- `i4`
+- `ui4`
+- `i1`
+
+Files:
+
+- `compiler/model_ir.py`
+- `compiler/mlir/mlir_builder.py`
+
+Tests:
+
+- parse/print all types
+- invalid dtype rejection
+
+Done when:
+
+- every supported dtype has a stable MLIR type.
+
+### 1.2 Add typed simulator memory accesses
+
+Extend the ISA/memory model so loads/stores carry a type.
+
+Suggested ISA forms:
+
+```asm
+LDG.F16 R0, [R1]
+LDG.BF16 R0, [R1]
+LDG.I8 R0, [R1]
+LDG.F8E4M3 R0, [R1]
+```
+
+Files:
+
+- `hw/isa.py`
+- `hw/memory.py`
+- `hw/core.py`
+
+Tests:
+
+- typed round-trip loads/stores
+- out-of-bounds checks
+
+Done when:
+
+- non-FP32 typed accesses work in the simulator.
+
+### 1.3 Add INT4/UINT4 packed layout semantics
+
+Implement:
+
+- two elements per byte,
+- signed/unsigned unpack,
+- zero-point handling later.
+
+Files:
+
+- `hw/memory.py`
+- `docs/types.md`
+
+Tests:
+
+- pack/unpack round-trip
+- signed/unsigned edge cases
+
+Done when:
+
+- INT4/UINT4 packing matches NumPy bit-level references.
+
+### 1.4 Add quantize/dequantize ops
+
+Define:
+
+- `mgpu.quant`
+- `mgpu.dequant`
+- `mgpu.requant`
+
+Attributes:
+
+- scale
+- zero point
+- storage type
+- compute type
+
+Files:
+
+- `compiler/mlir/mgpu_dialect.td`
+- `compiler/mlir/mlir_builder.py`
+
+Tests:
+
+- parse/print quant ops
+- semantic unit tests
+
+Done when:
+
+- quant/dequant metadata is represented explicitly.
+
+---
+
+## Phase 2: Real Model Import
+
+### 2.1 Import PyTorch FX with torch-mlir
+
+Implement:
+
+- replace manual FX converter with `torch_mlir` import,
+- produce stable MLIR module,
+- preserve parameter and buffer names.
+
+Files:
+
+- `compiler/frontends/torch_fx_frontend.py`
+- `compiler/mlir/importer.py` (new)
+
+Tests:
+
+- small CNN,
+- small Transformer block,
+- deterministic output.
+
+Done when:
+
+- real FX modules produce parsed MLIR.
+
+### 2.2 Import ONNX with torch-mlir/onnx-mlir
+
+Implement:
+
+- ONNX to MLIR import,
+- initializer handling,
+- dynamic dimension placeholder support.
+
+Files:
+
+- `compiler/frontends/onnx_frontend.py`
+- `compiler/mlir/importer.py`
+
+Tests:
+
+- exported CNN,
+- exported Transformer block.
+
+Done when:
+
+- real ONNX models import without manual op mapping.
+
+### 2.3 Canonicalize imported MLIR
+
+Run:
+
+- canonicalization,
+- shape inference,
+- decomposition.
+
+Target dialects:
+
+- `linalg`
+- `tosa`
+- `arith`
+- `math`
+- `memref`
+
+Tests:
+
+- op decomposition is deterministic.
+
+Done when:
+
+- imported models lower to a common high-level dialect set.
+
+---
+
+## Phase 3: Core MLIR Passes
+
+### 3.1 Implement `model-to-linalg`
+
+Lower high-level model ops:
+
+- attention,
+- layer norm,
+- RMS norm,
+- softmax,
+- convolution,
+- pooling.
+
+Tests:
+
+- one lit test per op.
+
+### 3.2 Implement tiling
+
+Tile:
+
+- matmul,
+- conv,
+- reductions,
+- attention.
+
+Configurable tile sizes:
+
+- `16x16x16` for matmul,
+- `8x8` conv tiles,
+- sequence tiles for attention.
+
+Tests:
+
+- tiled IR has expected `scf.for` nests.
+
+### 3.3 Implement bufferization
+
+Convert tensors to `memref`.
+
+Tests:
+
+- no tensor types remain after the pass.
+
+### 3.4 Implement grid/block/warp mapping
+
+Lower loops to:
+
+- `mgpu.launch`,
+- `mgpu.block_id`,
+- `mgpu.thread_id`,
+- `mgpu.grid_dim`,
+- `mgpu.block_dim`.
+
+Tests:
+
+- mapping is deterministic for fixed launch sizes.
+
+### 3.5 Implement `lower-to-mgpu`
+
+Insert:
+
+- `mgpu.shared_alloc`,
+- `mgpu.async_copy`,
+- `mgpu.barrier`,
+- `mgpu.mma`.
+
+Tests:
+
+- shared-memory tiles and barriers are present.
+
+### 3.6 Implement `mgpu-to-isa`
+
+Emit ISA:
+
+- register allocation,
+- instruction scheduling,
+- labels,
+- memory addresses,
+- launch dimensions.
+
+Tests:
+
+- emitted ISA runs in the simulator and matches NumPy.
+
+---
+
+## Phase 4: Tensor-Core MMA
+
+### 4.1 Execute `MMA` in the simulator
+
+Implement functional matrix multiply-accumulate.
+
+Supported:
+
+- `f32`,
+- `f16`,
+- `bf16`.
+
+Files:
+
+- `hw/core.py`
+- `hw/isa.py`
+
+Tests:
+
+- one `MMA` tile matches NumPy.
+
+### 4.2 Add fragment layout and shared-memory swizzle
+
+Implement:
+
+- A/B/C fragment layout,
+- swizzle pattern,
+- bank-conflict reporting.
+
+Tests:
+
+- conflict counters are stable.
+
+### 4.3 Lower tiled matmul to MMA
+
+Replace scalar FMA inner loops with `mgpu.mma`.
+
+Tests:
+
+- matmul E2E.
+
+### 4.4 Lower conv and attention to MMA
+
+Use im2col-style tiling for conv and attention.
+
+Tests:
+
+- conv E2E,
+- attention E2E.
+
+---
+
+## Phase 5: Quantization
+
+### 5.1 Import QDQ patterns
+
+Recognize:
+
+- `QuantizeLinear`,
+- `DequantizeLinear`,
+- QDQ-wrapped weights/activations.
+
+Tests:
+
+- QDQ graph lowers to quant/dequant ops.
+
+### 5.2 Lower INT8 matmul/conv
+
+Implement:
+
+- integer SIMT matmul,
+- tensor-core INT8 matmul,
+- accumulator rescale.
+
+Tests:
+
+- INT8 matmul/conv match PTQ reference.
+
+### 5.3 Add INT4/UINT4 unpack/dequant
+
+Implement:
+
+- packed loads,
+- signed/unsigned unpack,
+- scale/zero-point dequant.
+
+Tests:
+
+- packed matmul matches reference.
+
+### 5.4 Add FP8 E4M3/E5M2
+
+Implement:
+
+- conversion,
+- FP8 matmul,
+- MMA FP8 path.
+
+Tests:
+
+- FP8 matmul within documented tolerance.
+
+---
+
+## Phase 6: Real Model Examples
+
+### 6.1 ResNet-style block
+
+- export from PyTorch/ONNX,
+- lower through full pass pipeline,
+- compare with framework output.
+
+### 6.2 YOLO/SSD-style detection head
+
+- box decode,
+- NMS,
+- export and run.
+
+### 6.3 Small GPT decoder block
+
+- causal mask,
+- attention,
+- residual.
+
+### 6.4 KV-cache decode
+
+- append,
+- gather,
+- decode step.
+
+### 6.5 Autoregressive loop
+
+- run several decode steps,
+- compare outputs.
+
+---
+
+## Phase 7: Runtime and Hardening
+
+### 7.1 Add launch queue/command buffer
+
+Files:
+
+- `runtime/driver.py`
+- `runtime/profiler.py`
+
+Tests:
+
+- queued launches execute deterministically.
+
+### 7.2 Add explicit synchronization
+
+Tests:
+
+- synchronization does not corrupt state.
+
+### 7.3 Add source-location diagnostics
+
+Include:
+
+- op,
+- shape,
+- dtype,
+- pass,
+- source location.
+
+Tests:
+
+- invalid graph errors contain all fields.
+
+### 7.4 Add autotuning hooks
+
+Expose:
+
+- tile sizes,
+- MMA layouts,
+- shared-memory padding.
+
+Tests:
+
+- autotuner runs without changing numerical results.
+
+---
+
+## Final verification
+
+Run:
+
+```bash
+pre-commit run --all-files
+python -m unittest discover -v
+lit -q tests/mlir
+```
+
+The stage is complete when all real-model examples and quantization tests pass.
