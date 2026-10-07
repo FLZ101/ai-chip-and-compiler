@@ -21,6 +21,12 @@ SPECIAL_REGISTER_NAMES = {
 
 @dataclass
 class LaneState:
+    """State for one SIMT lane.
+
+    Lanes in the same warp execute the same instruction, but each has an
+    independent register file and ``active`` flag for divergence support.
+    """
+
     lane_id: int
     regs: RegisterFile = field(default_factory=RegisterFile)
     active: bool = True
@@ -28,6 +34,13 @@ class LaneState:
 
 @dataclass
 class WarpState:
+    """State for a 32-lane warp.
+
+    ``active_mask`` is the SIMT execution mask.  The MVP does not yet implement
+    branch reconvergence, but the mask is already the seam where that behavior
+    will be added.
+    """
+
     warp_id: int
     lanes: list[LaneState]
     pc: int = 0
@@ -36,6 +49,8 @@ class WarpState:
 
     @property
     def active_lanes(self) -> list[LaneState]:
+        # A lane participates in an instruction only when both the lane and its
+        # bit in the warp active mask are enabled.
         return [
             lane
             for lane in self.lanes
@@ -45,6 +60,12 @@ class WarpState:
 
 @dataclass
 class SM:
+    """Streaming multiprocessor.
+
+    Each SM owns private shared memory and zero or more resident warps.  The
+    first MVP only keeps one warp per SM to simplify scheduling.
+    """
+
     sm_id: int
     shared_memory: ByteMemory
     warps: list[WarpState] = field(default_factory=list)
@@ -53,6 +74,8 @@ class SM:
 
 @dataclass
 class Device:
+    """Top-level simulated GPU device."""
+
     global_memory: ByteMemory
     sms: list[SM]
     grid_dim: tuple[int, ...] = (1,)
@@ -61,6 +84,9 @@ class Device:
     clock: int = 0
 
     def run(self, program: Program) -> None:
+        # A single global cycle loop is the simplest deterministic scheduler.
+        # It advances every non-exited warp once per cycle.  A future timing
+        # model will replace this with issue, memory, and barrier stalls.
         while True:
             self.clock += 1
             for sm in self.sms:
@@ -87,6 +113,8 @@ def create_device(
     shared_size: int = 1 << 16,
     sm_count: int = 4,
 ) -> Device:
+    # The default sizes are intentionally small so tests run quickly.  The
+    # driver/runtime will eventually allocate tensors against these regions.
     return Device(
         global_memory=ByteMemory(global_size, name="global"),
         sms=[
@@ -103,6 +131,9 @@ def launch(
     grid_dim: tuple[int, ...] = (1,),
     block_dim: tuple[int, ...] = (1,),
 ) -> None:
+    # Launch dimensions are runtime values in a real GPU, but in the MVP they
+    # are function arguments.  Keeping them as tuples makes the eventual
+    # 1D/2D/3D grid handling straightforward.
     device.grid_dim = grid_dim
     device.block_dim = block_dim
     block_threads = math.prod(block_dim)
@@ -129,6 +160,8 @@ def launch(
 
 
 def _unflatten_index(index: int, shape: tuple[int, ...]) -> tuple[int, ...]:
+    # Convert a linear block index to a multi-dimensional CUDA-style index.
+    # For example, shape (3, 4) maps linear index 6 to (1, 2).
     result: list[int] = []
     for dim in reversed(shape):
         result.append(index % dim)
@@ -139,11 +172,15 @@ def _unflatten_index(index: int, shape: tuple[int, ...]) -> tuple[int, ...]:
 def _special_register_value(
     device: Device, sm: SM, warp: WarpState, lane: LaneState, name: str
 ) -> int:
+    # Special registers are evaluated on demand.  This keeps the execution
+    # loop agnostic to how the hardware scheduler derives thread/block IDs.
     if name == "laneid":
         return lane.lane_id
     if name == "warpid":
         return warp.warp_id
     if name == "tid":
+        # tid is the global thread index for the launched grid.  For one warp
+        # per block, this is the block's first thread plus the lane id.
         block_linear_id = getattr(sm, "_block_linear_id", 0)
         return block_linear_id * math.prod(device.block_dim) + lane.lane_id
     if name == "ntid":
@@ -158,6 +195,7 @@ def _special_register_value(
 
 
 def _flatten_index(index: tuple[int, ...], shape: tuple[int, ...]) -> int:
+    # Convert a multi-dimensional index to its linear form in row-major order.
     value = 0
     stride = 1
     for idx, dim in zip(reversed(index), reversed(shape)):
@@ -169,6 +207,12 @@ def _flatten_index(index: tuple[int, ...], shape: tuple[int, ...]) -> int:
 def _read_operand(
     device: Device, sm: SM, warp: WarpState, lane: LaneState, operand: object
 ) -> int | float:
+    """Resolve a parsed operand to a per-lane scalar value.
+
+    Registers, special registers, immediates, and memory-address expressions
+    all flow through this function.  Memory operands resolve to an absolute
+    address for the caller to load/store.
+    """
     if isinstance(operand, Reg):
         if operand.name in SPECIAL_REGISTER_NAMES:
             return _special_register_value(device, sm, warp, lane, operand.name)
@@ -176,6 +220,8 @@ def _read_operand(
     if isinstance(operand, Imm):
         return operand.value
     if isinstance(operand, Mem):
+        # Memory operands are base-plus-byte-offset.  The base may be a normal
+        # register or a scheduler-provided special register.
         base = (
             _special_register_value(device, sm, warp, lane, operand.base)
             if operand.base in SPECIAL_REGISTER_NAMES
@@ -192,6 +238,8 @@ def _write_register(lane: LaneState, dst: Reg, value: int | float) -> None:
 def _alu(
     op: str, a: int | float, b: int | float | None = None, c: int | float | None = None
 ) -> int | float:
+    # This is the scalar ALU.  It is called once per active lane, which is the
+    # simplest possible implementation of a vector/SIMT ALU.
     if op == "MOV":
         return a
     if op == "NEG":
@@ -230,6 +278,12 @@ def _alu(
 def execute_warp(
     device: Device, sm: SM, warp: WarpState, instruction: Instruction
 ) -> None:
+    """Execute one instruction for all active lanes in a warp.
+
+    The function handles a few terminal/control opcodes directly, then falls
+    through to per-lane memory or ALU behavior.  It increments the warp PC once
+    at the end, mirroring lockstep SIMT execution.
+    """
     op = instruction.op
 
     if op == "EXIT":
@@ -248,6 +302,8 @@ def execute_warp(
 
     for lane in warp.active_lanes:
         if op in {"LDG", "LDS"}:
+            # Loads read 4 bytes from either global or shared memory.  Each
+            # lane computes its own address from its own register values.
             if not isinstance(instruction.dst, Reg):
                 raise ValueError(f"{op} destination is not a register")
             mem_operand = instruction.srcs[0]
@@ -258,6 +314,9 @@ def execute_warp(
             value = memory.read_f32(addr)
             _write_register(lane, instruction.dst, value)
         elif op in {"STG", "STS"}:
+            # Stores write the value from the source register to the resolved
+            # per-lane address.  Shared-memory visibility after barriers is a
+            # later milestone; the MVP executes a single warp per SM.
             mem_operand = instruction.dst
             if not isinstance(mem_operand, Mem):
                 raise ValueError(f"{op} destination is not a memory operand")
@@ -282,6 +341,9 @@ def execute_warp(
             "LOG2",
         }:
             if op == "FMA":
+                # FMA uses three source operands: a, b, and the accumulated
+                # value c.  This maps directly to the future MMA/vector FMA
+                # datapath.
                 if len(instruction.srcs) != 3:
                     raise ValueError(
                         "FMA expects three source operands after destination"

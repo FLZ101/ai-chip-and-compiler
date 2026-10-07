@@ -3,6 +3,8 @@ import unittest
 from hw.device import create_device, launch
 from hw.isa import parse_asm
 
+# A handwritten vector-add kernel.  Each thread handles one FP32 element using
+# byte addresses: input A starts at 0, input B at 4096, and output at 8192.
 VECTOR_ADD_ASM = """
 MUL R0, tid, 4
 LDG R1, [R0]
@@ -14,7 +16,12 @@ EXIT
 
 
 class TestVectorAddEndToEnd(unittest.TestCase):
+    """Full ISA -> simulator integration test for elementwise vector add."""
+
     def test_vector_add(self):
+        # Build tiny host-side inputs and a NumPy-free expected result.  This
+        # test intentionally avoids NumPy to prove the simulator itself is
+        # doing the computation.
         n = 8
         a = [float(i + 1) for i in range(n)]
         b = [float(10 * i) for i in range(n)]
@@ -31,6 +38,9 @@ class TestVectorAddEndToEnd(unittest.TestCase):
         self.assertEqual(actual, expected)
 
     def test_simulator_is_cycle_stable(self):
+        # The simple deterministic scheduler must produce the same cycle count
+        # for identical launches.  This is the base contract for later
+        # performance counters.
         cycles = set()
         for _ in range(3):
             device = create_device(global_size=1 << 20, sm_count=4)

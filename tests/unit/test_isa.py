@@ -4,7 +4,11 @@ from hw.isa import Imm, Mem, Reg, parse_asm, format_program
 
 
 class TestIsaParser(unittest.TestCase):
+    """Tests for ISA assembly parsing and formatting."""
+
     def test_parse_vector_add_program(self):
+        # This is the first real ISA program.  It multiplies the thread id by 4
+        # bytes, loads two floats, adds them, stores the result, and exits.
         program = parse_asm("""
             MUL R0, tid, 4
             LDG R1, [R0]
@@ -22,6 +26,8 @@ class TestIsaParser(unittest.TestCase):
         self.assertEqual(program[4].operands, (Mem("R0", 8192), Reg("R3")))
 
     def test_parse_special_math_instructions(self):
+        # Transformer kernels need reciprocal, reciprocal-square-root, exp2,
+        # log2, and fused multiply-add for softmax and normalization.
         program = parse_asm("""
             RCP R1, R2
             RSQRT R3, R4
@@ -34,6 +40,8 @@ class TestIsaParser(unittest.TestCase):
         )
 
     def test_round_trip(self):
+        # Round-tripping through the formatter must produce the same program.
+        # This guarantees the MLIR backend can emit and reload ISA text later.
         asm = """
         MOV R0, tid
         MUL R1, R0, 4
@@ -48,10 +56,13 @@ class TestIsaParser(unittest.TestCase):
         self.assertEqual(first.labels, second.labels)
 
     def test_rejects_non_register_destination(self):
+        # An immediate cannot be written by an ALU instruction.
         with self.assertRaises(ValueError):
             parse_asm("ADD 3, R1, R2")
 
     def test_rejects_duplicate_label(self):
+        # Labels are the future branch target namespace, so duplicates must be
+        # rejected early instead of producing ambiguous branch addresses.
         with self.assertRaises(ValueError):
             parse_asm("""
                 LOOP:

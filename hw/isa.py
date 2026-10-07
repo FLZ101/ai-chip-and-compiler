@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+# Registers whose value is provided by the GPU scheduler rather than by a
+# kernel instruction.  They are read-only from the perspective of ISA code.
 SPECIAL_REGISTERS = {
     "tid",
     "ntid",
@@ -20,43 +22,67 @@ SPECIAL_REGISTERS = {
     "clock",
 }
 
+# Opcodes whose first operand is a register destination.
 REGISTER_DEST_OPS = {
+    # Data movement.
     "MOV",
+    # Integer/FP arithmetic.
     "ADD",
     "SUB",
     "MUL",
     "DIV",
+    # Fused multiply-add: dst = a * b + c.
     "FMA",
+    # Unary ALU operations.
     "NEG",
     "ABS",
+    # Min/max used by reductions and activation code.
     "MAX",
     "MIN",
+    # Special functions used by softmax, LayerNorm, and RMSNorm.
     "RCP",
     "RSQRT",
     "EXP2",
     "LOG2",
+    # Predicate/select operations reserved for control-flow lowering.
     "CMP",
     "SEL",
+    # Global and shared loads write a destination register.
     "LDG",
     "LDS",
 }
 
+# Opcodes whose first operand is a memory destination.  Memory stores use a
+# different order from loads so the assembly remains close to typical SIMT ISAs:
+#   STG [addr], value
 MEMORY_DEST_OPS = {"STG", "STS"}
+# Opcodes that affect control flow.  Labels are resolved by the parser for a
+# future branch implementation; only EXIT/RET/BAR.SYNC are executed in the MVP.
 CONTROL_OPS = {"BRA", "RET", "EXIT", "BAR.SYNC"}
 
 
 @dataclass(frozen=True)
 class Reg:
+    """A named register operand such as R0, tid, or laneid."""
+
     name: str
 
 
 @dataclass(frozen=True)
 class Imm:
+    """An integer or floating-point immediate encoded directly in the instruction."""
+
     value: int | float
 
 
 @dataclass(frozen=True)
 class Mem:
+    """A base-plus-offset memory operand.
+
+    The parser accepts forms like ``[R0]``, ``[R0 + 16]``, and ``[R0 - 4]``.
+    The simulator resolves the base register and adds the byte offset.
+    """
+
     base: str
     offset: int = 0
 
@@ -66,11 +92,19 @@ Operand = Reg | Imm | Mem
 
 @dataclass(frozen=True)
 class Instruction:
+    """One parsed ISA instruction.
+
+    Operands are kept in their original assembly order.  ``dst`` and ``srcs``
+    provide an opcode-aware view used by the execution core.
+    """
+
     op: str
     operands: tuple[Operand, ...] = ()
 
     @property
     def dst(self) -> Operand:
+        # Register-writing instructions put the destination first.  Loads such
+        # as LDG and LDS also put the destination register first.
         if self.op in REGISTER_DEST_OPS:
             if not isinstance(self.operands[0], Reg):
                 raise ValueError(f"{self.op} requires a register destination")
@@ -83,6 +117,9 @@ class Instruction:
 
     @property
     def srcs(self) -> tuple[Operand, ...]:
+        # Memory stores put the destination memory operand first, so all
+        # remaining operands are sources.  Register/load destinations behave
+        # the same way.
         if self.op in REGISTER_DEST_OPS or self.op in MEMORY_DEST_OPS:
             return self.operands[1:]
         return ()
@@ -101,6 +138,8 @@ class Program:
 
 
 def _is_register_name(token: str) -> bool:
+    # R0..RN are the normal per-thread registers.  Special registers describe
+    # the current thread, block, grid, warp, lane, and clock.
     return token in SPECIAL_REGISTERS or (token.startswith("R") and token[1:].isdigit())
 
 
@@ -110,6 +149,9 @@ def _parse_operand(token: str) -> Operand:
         raise ValueError("empty operand")
 
     if token.startswith("[") and token.endswith("]"):
+        # Memory operands are byte-addressed in the ISA.  An empty bracket is a
+        # convenience for address zero, although normal kernels should use an
+        # explicit base register.
         inner = token[1:-1].strip()
         if not inner:
             return Mem("RZ", 0)
@@ -134,7 +176,12 @@ def _parse_operand(token: str) -> Operand:
 
 
 def _split_operands(text: str) -> list[str]:
-    """Split top-level commas while preserving memory brackets."""
+    """Split top-level commas while preserving memory brackets.
+
+    A simple ``text.split(",")`` would break ``[R0 + 8], R1`` incorrectly if
+    future syntax ever uses commas inside brackets.  Tracking bracket depth
+    keeps memory operands intact.
+    """
     parts: list[str] = []
     depth = 0
     current: list[str] = []
@@ -154,6 +201,13 @@ def _split_operands(text: str) -> list[str]:
 
 
 def parse_asm(text: str) -> Program:
+    """Parse assembly text into a :class:`Program`.
+
+    The parser is deliberately permissive for valid instructions and strict for
+    malformed destinations.  Unsupported opcodes are accepted syntactically but
+    fail later in the execution core, so the ISA can grow without changing the
+    parser.
+    """
     instructions: list[Instruction] = []
     labels: dict[str, int] = {}
 
@@ -162,7 +216,8 @@ def parse_asm(text: str) -> Program:
         if not line or line.startswith(";") or line.startswith("//"):
             continue
 
-        # Strip trailing comments outside brackets.
+        # Strip trailing comments outside brackets.  Semicolons inside a memory
+        # operand are not treated as comments.
         stripped: list[str] = []
         depth = 0
         for ch in line:
@@ -178,6 +233,8 @@ def parse_asm(text: str) -> Program:
             continue
 
         if line.endswith(":"):
+            # Labels are recorded against the next instruction index.  They are
+            # currently unused by the MVP, but branches will resolve them later.
             label = line[:-1].strip()
             if label in labels:
                 raise ValueError(f"duplicate label: {label}")
@@ -227,6 +284,8 @@ def _format_operand(operand: Operand) -> str:
             return repr(operand.value)
         return str(operand.value)
     if operand.offset:
+        # Normalize the offset so round-tripping is stable regardless of whether
+        # the user wrote +8, -4, or an unsigned immediate.
         sign = "+" if operand.offset > 0 else "-"
         return f"[{operand.base} {sign} {abs(operand.offset)}]"
     return f"[{operand.base}]"

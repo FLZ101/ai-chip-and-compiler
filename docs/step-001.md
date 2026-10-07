@@ -1,0 +1,208 @@
+# Step 001: First Simulator Vertical Slice
+
+This document describes what is currently implemented in the repository.
+
+The first milestone is intentionally narrow: prove that we can parse a small GPU ISA, model global/shared memory, execute a simple SIMT warp, and run an end-to-end vector-add program against a deterministic simulator.
+
+---
+
+## 1. What is implemented
+
+### 1.1 ISA
+
+File: [../hw/isa.py](../hw/isa.py)
+
+- Parses compact assembly text into structured `Instruction` objects.
+- Supports three operand kinds:
+  - `Reg`: normal and special registers.
+  - `Imm`: integer or floating-point immediate.
+  - `Mem`: base-plus-byte-offset memory operand.
+- Supports ALU, memory, control, and special-function opcodes.
+- Performs early validation for register and memory destinations.
+- Formats parsed programs back to assembly.
+- Reserves labels for future branch support.
+
+Supported opcode groups:
+
+| Group | Opcodes |
+| --- | --- |
+| ALU | `MOV`, `ADD`, `SUB`, `MUL`, `DIV`, `NEG`, `ABS`, `MAX`, `MIN`, `FMA` |
+| Special math | `RCP`, `RSQRT`, `EXP2`, `LOG2` |
+| Memory | `LDG`, `STG`, `LDS`, `STS` |
+| Control | `EXIT`, `RET`, `BAR.SYNC`, `BRA` reserved |
+
+Special registers:
+
+- `tid`, `ntid`
+- `ctaid`, `nctaid`
+- `laneid`, `warpid`
+- `clock`
+
+### 1.2 Memory model
+
+File: [../hw/memory.py](../hw/memory.py)
+
+- `ByteMemory` models byte-addressable global or shared memory.
+- FP32 access is implemented as little-endian 4-byte reads and writes.
+- All accesses have bounds checks.
+- `RegisterFile` provides per-thread registers `R0..R63`.
+- `as_int` rejects non-integral address values.
+
+### 1.3 SIMT execution core
+
+File: [../hw/core.py](../hw/core.py)
+
+Implemented hardware abstractions:
+
+- `LaneState`: one thread lane with its own registers.
+- `WarpState`: one warp with lanes, program counter, active mask, and exit state.
+- `SM`: one streaming multiprocessor with shared memory and resident warps.
+- `Device`: top-level GPU with global memory and multiple SMs.
+
+Execution loop:
+
+```text
+device.clock += 1
+for each SM:
+    for each warp:
+        if not exited:
+            execute current instruction for all active lanes
+```
+
+Implemented instruction execution:
+
+- global and shared loads/stores,
+- scalar ALU operations per active lane,
+- special register evaluation,
+- `EXIT` and `RET`,
+- `BAR.SYNC` accepted as a no-op placeholder.
+
+### 1.4 Public device API
+
+File: [../hw/device.py](../hw/device.py)
+
+Exports:
+
+- `create_device`
+- `launch`
+- `Device`
+
+This keeps the execution-core implementation behind a stable public interface.
+
+---
+
+## 2. End-to-end test
+
+File: [../tests/operator_e2e/test_vector_add_e2e.py](../tests/operator_e2e/test_vector_add_e2e.py)
+
+The first full test executes this ISA program:
+
+```asm
+MUL R0, tid, 4
+LDG R1, [R0]
+LDG R2, [R0 + 4096]
+ADD R3, R1, R2
+STG [R0 + 8192], R3
+EXIT
+```
+
+Flow:
+
+1. Create a device.
+2. Write input vectors to global memory.
+3. Parse the assembly.
+4. Launch one block with `n` threads.
+5. Execute the kernel.
+6. Read output floats from global memory.
+7. Compare with the expected result.
+
+The test also verifies that identical launches produce identical cycle counts.
+
+---
+
+## 3. ISA unit tests
+
+File: [../tests/unit/test_isa.py](../tests/unit/test_isa.py)
+
+Tests cover:
+
+- vector-add program parsing,
+- special-function instruction parsing,
+- assembly parse/format round-trip,
+- rejection of non-register destinations,
+- rejection of duplicate labels.
+
+---
+
+## 4. Project tooling
+
+### Packaging
+
+File: [../pyproject.toml](../pyproject.toml)
+
+- PEP 621 project metadata.
+- Runtime dependencies: `numpy`, `onnx`.
+- Optional groups: `test`, `frameworks`, `hardware`, `dev`.
+- Pytest configuration.
+- Black configuration.
+
+### Pre-commit
+
+File: [../.pre-commit-config.yaml](../.pre-commit-config.yaml)
+
+- Runs Black through the official Black pre-commit mirror.
+- Installed in the local Git repository.
+
+### Virtual environment
+
+The project uses a local `.venv`.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+```
+
+---
+
+## 5. What is intentionally not implemented yet
+
+The current simulator is only the first vertical slice. It does not yet include:
+
+- branch divergence and reconvergence,
+- a real block-scoped barrier,
+- multiple warps per SM,
+- multiple blocks per SM over time,
+- L1/L2 cache modeling,
+- memory latency and bandwidth,
+- warp stall reasons,
+- shared-memory bank-conflict detection,
+- tensor-core `MMA` execution,
+- FP16/BF16/FP8/INT8/INT4 support,
+- a Model IR or MLIR compiler pipeline.
+
+These items are described in [gpu.md](gpu.md), [types.md](types.md), and the overall [PLAN.md](PLAN.md).
+
+---
+
+## 6. How to run
+
+```bash
+source .venv/bin/activate
+python -m unittest discover -v
+```
+
+Expected result: all current tests pass.
+
+---
+
+## 7. Next step
+
+The next step is to make the execution core more faithful to a modern GPU:
+
+1. Implement warp divergence and a simple reconvergence stack.
+2. Implement a real block barrier.
+3. Allow multiple warps per SM.
+4. Add the first timing counters: cycles, issued instructions, and stall reasons.
+
+After that, the project can begin the MLIR compiler foundation.
