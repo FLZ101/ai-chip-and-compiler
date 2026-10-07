@@ -18,6 +18,8 @@ test = [
   "pytest>=9.0",
   "black>=26.0",
   "pre-commit>=4.6",
+  "lit>=23.0",
+  "filecheck>=1.0",
 ]
 frameworks = [
   "torch>=2.14",
@@ -34,6 +36,8 @@ dev = [
   "pytest>=9.0",
   "black>=26.0",
   "pre-commit>=4.6",
+  "lit>=23.0",
+  "filecheck>=1.0",
   "torch>=2.14",
   "torchvision>=0.29",
   "torch-mlir>=2026.0",

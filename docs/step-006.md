@@ -118,3 +118,24 @@ python -m unittest discover -v
 ```
 
 All existing tests continue to pass.
+
+---
+
+## 6. Lit tests
+
+The MLIR text output is also checked with LLVM-style lit tests in
+[../tests/mlir](../tests/mlir):
+
+- [vector_add.mlir](../tests/mlir/vector_add.mlir)
+- [matmul.mlir](../tests/mlir/matmul.mlir)
+- [conv2d.mlir](../tests/mlir/conv2d.mlir)
+
+Each test runs `emit_graph.py` through the `filecheck` clone and verifies the
+expected `func`, `linalg`, and `mgpu` lines.
+
+Run:
+
+```bash
+source .venv/bin/activate
+lit -v tests/mlir
+```
