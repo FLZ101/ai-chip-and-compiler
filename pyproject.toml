@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-chip-and-compiler"
+version = "0.1.0"
+description = "Minimal GPU simulator and MLIR-based compiler for CNN and Transformer/LLM inference"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=2.3",
+  "onnx>=1.17",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=9.0",
+  "black>=26.0",
+  "pre-commit>=4.6",
+]
+frameworks = [
+  "torch>=2.14",
+  "torchvision>=0.29",
+  "torch-mlir>=2026.0",
+]
+hardware = [
+  "pyrtl>=1.0",
+  "amaranth>=0.5",
+  "cocotb>=2.0",
+  "migen>=0.9",
+]
+dev = [
+  "pytest>=9.0",
+  "black>=26.0",
+  "pre-commit>=4.6",
+  "torch>=2.14",
+  "torchvision>=0.29",
+  "torch-mlir>=2026.0",
+  "pyrtl>=1.0",
+  "amaranth>=0.5",
+  "cocotb>=2.0",
+  "migen>=0.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hw*", "compiler*", "runtime*", "kernels*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
