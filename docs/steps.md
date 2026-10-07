@@ -353,6 +353,8 @@ Reference:
 
 ## Step 012: Transformer normalization and softmax
 
+Status: **done**
+
 Goal:
 
 - Add the stable numeric primitives used by attention.
@@ -366,6 +368,10 @@ Kernels:
 Exit criteria:
 
 - Each op matches NumPy within tolerance and is numerically stable.
+
+Reference:
+
+- [step-012.md](step-012.md)
 
 ---
 

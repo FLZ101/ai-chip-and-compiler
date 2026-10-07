@@ -10,6 +10,7 @@ from .cnn_kernels import lower_cnn_kernel
 from .common_kernels import lower_common_kernel
 from .norm_detection_kernels import lower_norm_detection_kernel
 from .shape_kernels import lower_shape_kernel
+from .transformer_kernels import lower_transformer_kernel
 
 
 def lower_kernel(
@@ -54,4 +55,10 @@ def lower_kernel(
         Op.NMS,
     }:
         return lower_norm_detection_kernel(graph, mlir_text, layout)
+    if node.op in {
+        Op.SOFTMAX,
+        Op.LAYER_NORM,
+        Op.RMS_NORM,
+    }:
+        return lower_transformer_kernel(graph, mlir_text, layout)
     return lower_common_kernel(graph, mlir_text, layout)
