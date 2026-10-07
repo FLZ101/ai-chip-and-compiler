@@ -51,9 +51,10 @@ Today `mgpu-opt` can:
 - parse MLIR,
 - register the `mgpu` dialect,
 - verify custom `mgpu.*` operations,
-- print the module back deterministically.
+- print the module back deterministically,
+- run the `tile-linalg` pass to tile buffer-form linalg operations.
 
-It does not yet contain project-specific lowering passes.
+The remaining project-specific lowering passes are implemented in later phases.
 
 ---
 
@@ -109,6 +110,14 @@ Run canonicalization later:
 mgpu-opt input.mlir \
   --pass-pipeline="builtin.module(canonicalize,cse)" \
   -o canonical.mlir
+```
+
+Run the implemented linalg tiling pass:
+
+```bash
+mgpu-opt input.mlir \
+  --pass-pipeline="builtin.module(func.func(tile-linalg))" \
+  -o tiled.mlir
 ```
 
 Run the future full pipeline:
@@ -171,7 +180,7 @@ Expected result: the module parses and prints successfully.
 
 ## 7. Current limitations
 
-- No lowering passes yet.
+- No lowering passes yet except `tile-linalg`.
 - Dimension attributes are numeric `I32Attr`, not symbolic `x`/`y`/`z`.
 - `mgpu.shared_alloc`, `mgpu.async_copy`, and `mgpu.mma` are defined but not
   lowered or executed yet.

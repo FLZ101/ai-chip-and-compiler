@@ -304,6 +304,10 @@ Tests:
 
 ### 3.2 Implement tiling
 
+Status: **done**
+
+Reference: [step-3.2.md](step-3.2.md)
+
 Tile:
 
 - matmul,
