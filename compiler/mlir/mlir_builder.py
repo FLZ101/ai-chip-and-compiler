@@ -46,6 +46,12 @@ _BINARY_ARITH = {
     Op.DIV: "arith.divf",
 }
 
+_REDUCTION_ARITH = {
+    Op.REDUCE_SUM: "arith.addf",
+    Op.REDUCE_MEAN: "arith.addf",
+    Op.REDUCE_MAX: "arith.maximumf",
+}
+
 
 @dataclass
 class MLIRBuilder:
@@ -160,6 +166,8 @@ class MLIRBuilder:
     def _emit_compute(self, node: Node, result_name: str, indent: str) -> list[str]:
         if node.op in _BINARY_ARITH:
             return self._emit_binary_generic(node, result_name, indent)
+        if node.op in _REDUCTION_ARITH:
+            return self._emit_reduction(node, result_name, indent)
         if node.op == Op.MATMUL:
             return self._emit_matmul(node, result_name, indent)
         if node.op == Op.CONV2D:
@@ -215,6 +223,33 @@ class MLIRBuilder:
             f"ins({self._value_names[left.name]}, {self._value_names[right.name]} : "
             f"{left_type}, {right_type}) outs({result_name} : {out_type}) "
             f"-> {out_type}"
+        ]
+
+    def _emit_reduction(self, node: Node, result_name: str, indent: str) -> list[str]:
+        value = node.inputs[0]
+        output = node.outputs[0]
+        if value.rank != 1 or output.rank != 0:
+            raise MLIRBuilderError(
+                "MLIR reduction lowering currently supports rank-1 to scalar "
+                "reductions"
+            )
+
+        value_type = self._memref_type(value)
+        out_type = self._memref_type(output)
+        scalar_type = self._scalar_type(output.dtype)
+        arith_op = _REDUCTION_ARITH[node.op]
+
+        return [
+            f"{indent}{result_name} = linalg.generic {{",
+            f"{indent}  indexing_maps = [affine_map<(d0) -> (d0)>, "
+            "affine_map<(d0) -> ()>]",
+            f'{indent}  iterator_types = ["reduction"]',
+            f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
+            f"outs({result_name} : {out_type}) {{",
+            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+            f"{indent}  %value = {arith_op} %in, %out : {scalar_type}",
+            f"{indent}  linalg.yield %value : {scalar_type}",
+            f"{indent}}} -> {out_type}",
         ]
 
     def _emit_conv2d(self, node: Node, result_name: str, indent: str) -> list[str]:

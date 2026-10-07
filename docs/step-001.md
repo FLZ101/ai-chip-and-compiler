@@ -5,10 +5,11 @@ Step 002 (branches, divergence, and reconvergence) and Step 003 (block barriers
 and multi-warp scheduling), and Step 004 (timing model and performance counters)
 and Step 005 (unified Model IR and manual frontend) and Step 006 (MLIR builder
 and `mgpu` dialect) and Step 007 (shared operator E2E harness) are now also
-implemented.
+implemented, and Step 008 (common kernels) is also implemented.
 They are described in [step-002.md](step-002.md), [step-003.md](step-003.md),
 [step-004.md](step-004.md), [step-005.md](step-005.md), and
-[step-006.md](step-006.md), and [step-007.md](step-007.md).
+[step-006.md](step-006.md), [step-007.md](step-007.md), and
+[step-008.md](step-008.md).
 
 The first milestone is intentionally narrow: prove that we can parse a small GPU ISA, model global/shared memory, execute a simple SIMT warp, and run an end-to-end vector-add program against a deterministic simulator.
 
@@ -203,6 +204,6 @@ Expected result: all current tests pass.
 
 ## 7. Next step
 
-The next step is to implement the shared compute backbone: elementwise kernels,
-reductions, and tiled matmul.  This is described as Step 008 in
+The next step is to add activation and shape/layout kernels used by both CNN
+and Transformer graphs.  This is described as Step 009 in
 [steps.md](steps.md).

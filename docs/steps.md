@@ -239,6 +239,8 @@ Reference:
 
 ## Step 008: Common kernels
 
+Status: **done**
+
 Goal:
 
 - Implement the shared compute backbone.
@@ -265,6 +267,10 @@ Exit criteria:
 
 - Common kernels match NumPy.
 - Tiled matmul is correct.
+
+Reference:
+
+- [step-008.md](step-008.md)
 
 ---
 

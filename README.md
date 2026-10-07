@@ -8,6 +8,7 @@ The project is under active development. Current status:
 - Unified Model IR in `compiler/model_ir.py`
 - Manual CNN/Transformer graph frontend in `compiler/frontends/`
 - MLIR text builder and `mgpu` dialect in `compiler/mlir/`
+- Shared ISA kernel lowerings in `compiler/codegen/`
 - Unit, operator end-to-end, and MLIR lit tests in `tests/`
 
 ## Setup
