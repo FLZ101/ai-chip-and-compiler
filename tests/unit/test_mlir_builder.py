@@ -70,7 +70,7 @@ class TestMLIRBuilder(unittest.TestCase):
     def test_unsupported_op_raises(self):
         frontend = ManualFrontend("unsupported")
         x = frontend.add_input("x", DType.F32, (8,))
-        output = frontend.relu(x)
+        output = frontend.hard_sigmoid(x)
         frontend.output(output)
 
         with self.assertRaises(MLIRBuilderError):

@@ -172,6 +172,23 @@ class MLIRBuilder:
             return self._emit_matmul(node, result_name, indent)
         if node.op == Op.CONV2D:
             return self._emit_conv2d(node, result_name, indent)
+        if node.op in {
+            Op.RELU,
+            Op.LEAKY_RELU,
+            Op.SILU,
+            Op.GELU,
+            Op.SIGMOID,
+        }:
+            return self._emit_activation(node, result_name, indent)
+        if node.op in {
+            Op.RESHAPE,
+            Op.TRANSPOSE,
+            Op.CONCAT,
+            Op.SLICE,
+            Op.PAD,
+            Op.RESIZE,
+        }:
+            return self._emit_shape_placeholder(node, result_name, indent)
         raise MLIRBuilderError(
             f"MLIR lowering for op {node.op.value!r} is not implemented "
             f"(node {node.name!r})"
@@ -223,6 +240,109 @@ class MLIRBuilder:
             f"ins({self._value_names[left.name]}, {self._value_names[right.name]} : "
             f"{left_type}, {right_type}) outs({result_name} : {out_type}) "
             f"-> {out_type}"
+        ]
+
+    def _emit_activation(self, node: Node, result_name: str, indent: str) -> list[str]:
+        value = node.inputs[0]
+        output = node.outputs[0]
+        if value.shape != output.shape:
+            raise MLIRBuilderError("activation lowering requires equal shapes")
+
+        scalar_type = self._scalar_type(output.dtype)
+        value_type = self._memref_type(value)
+        out_type = self._memref_type(output)
+        dims = ", ".join(f"d{axis}" for axis in range(output.rank))
+        identity = f"affine_map<({dims}) -> ({dims})>"
+        iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
+
+        if node.op == Op.RELU:
+            body = [
+                f"{indent}  %c0 = arith.constant 0.000000e+00 : {scalar_type}",
+                f"{indent}  %value = arith.maximumf %in, %c0 : {scalar_type}",
+            ]
+        elif node.op == Op.LEAKY_RELU:
+            alpha = float(node.attrs.get("alpha", 0.01))
+            body = [
+                f"{indent}  %c0 = arith.constant 0.000000e+00 : {scalar_type}",
+                f"{indent}  %neg = arith.cmpf olt, %in, %c0 : {scalar_type}",
+                f"{indent}  %scaled = arith.mulf %in, " f"{alpha!r} : {scalar_type}",
+                f"{indent}  %value = arith.select %neg, %scaled, %in : {scalar_type}",
+            ]
+        elif node.op == Op.SIGMOID:
+            body = [
+                f"{indent}  %neg = arith.negf %in : {scalar_type}",
+                f"{indent}  %exp = math.exp %neg : {scalar_type}",
+                f"{indent}  %one = arith.constant 1.000000e+00 : {scalar_type}",
+                f"{indent}  %den = arith.addf %one, %exp : {scalar_type}",
+                f"{indent}  %value = arith.divf %one, %den : {scalar_type}",
+            ]
+        elif node.op == Op.SILU:
+            body = [
+                f"{indent}  %neg = arith.negf %in : {scalar_type}",
+                f"{indent}  %exp = math.exp %neg : {scalar_type}",
+                f"{indent}  %one = arith.constant 1.000000e+00 : {scalar_type}",
+                f"{indent}  %den = arith.addf %one, %exp : {scalar_type}",
+                f"{indent}  %sigmoid = arith.divf %one, %den : {scalar_type}",
+                f"{indent}  %value = arith.mulf %in, %sigmoid : {scalar_type}",
+            ]
+        elif node.op == Op.GELU:
+            body = [
+                f"{indent}  %cst = arith.constant 0.7978845608028654 : {scalar_type}",
+                f"{indent}  %x2 = arith.mulf %in, %in : {scalar_type}",
+                f"{indent}  %x3 = arith.mulf %x2, %in : {scalar_type}",
+                f"{indent}  %cst2 = arith.constant 0.044715 : {scalar_type}",
+                f"{indent}  %poly = arith.mulf %cst2, %x3 : {scalar_type}",
+                f"{indent}  %sum = arith.addf %in, %poly : {scalar_type}",
+                f"{indent}  %arg = arith.mulf %cst, %sum : {scalar_type}",
+                f"{indent}  %tanh = math.tanh %arg : {scalar_type}",
+                f"{indent}  %one = arith.constant 1.000000e+00 : {scalar_type}",
+                f"{indent}  %one_t = arith.addf %one, %tanh : {scalar_type}",
+                f"{indent}  %half = arith.constant 0.5 : {scalar_type}",
+                f"{indent}  %value = arith.mulf %in, %one_t : {scalar_type}",
+                f"{indent}  %value2 = arith.mulf %value, %half : {scalar_type}",
+            ]
+        else:
+            raise MLIRBuilderError(f"unsupported activation: {node.op.value}")
+
+        yield_line = (
+            f"{indent}  linalg.yield %value2 : {scalar_type}"
+            if node.op == Op.GELU
+            else f"{indent}  linalg.yield %value : {scalar_type}"
+        )
+        return [
+            f"{indent}{result_name} = linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {identity}]",
+            f"{indent}  iterator_types = [{iterator_types}]",
+            f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
+            f"outs({result_name} : {out_type}) {{",
+            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+            *body,
+            yield_line,
+            f"{indent}}} -> {out_type}",
+        ]
+
+    def _emit_shape_placeholder(
+        self, node: Node, result_name: str, indent: str
+    ) -> list[str]:
+        value = node.inputs[0]
+        output = node.outputs[0]
+        scalar_type = self._scalar_type(output.dtype)
+        value_type = self._memref_type(value)
+        out_type = self._memref_type(output)
+        dims = ", ".join(f"d{axis}" for axis in range(output.rank))
+        identity = f"affine_map<({dims}) -> ({dims})>"
+        iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
+        return [
+            f"{indent}// Shape/layout op is lowered by mgpu-to-isa; "
+            "linalg identity is a placeholder.",
+            f"{indent}{result_name} = linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {identity}]",
+            f"{indent}  iterator_types = [{iterator_types}]",
+            f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
+            f"outs({result_name} : {out_type}) {{",
+            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+            f"{indent}  linalg.yield %in : {scalar_type}",
+            f"{indent}}} -> {out_type}",
         ]
 
     def _emit_reduction(self, node: Node, result_name: str, indent: str) -> list[str]:

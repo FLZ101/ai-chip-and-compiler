@@ -547,6 +547,8 @@ def _alu(
         return a * b
     if op == "DIV":
         return a / b
+    if op == "IDIV":
+        return int(a) // int(b)
     if op == "MAX":
         return max(a, b)
     if op == "MIN":
@@ -765,6 +767,7 @@ def execute_warp(
             "SUB",
             "MUL",
             "DIV",
+            "IDIV",
             "MAX",
             "MIN",
             "FMA",

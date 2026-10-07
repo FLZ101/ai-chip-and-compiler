@@ -276,6 +276,8 @@ Reference:
 
 ## Step 009: Activation and shape/layout kernels
 
+Status: **done**
+
 Goal:
 
 - Add ops needed by both CNN and Transformer graphs.
@@ -288,6 +290,10 @@ Kernels:
 Exit criteria:
 
 - Each operator has a NumPy golden E2E test.
+
+Reference:
+
+- [step-009.md](step-009.md)
 
 ---
 

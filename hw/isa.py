@@ -39,6 +39,7 @@ REGISTER_DEST_OPS = {
     "SUB",
     "MUL",
     "DIV",
+    "IDIV",
     # Fused multiply-add: dst = a * b + c.
     "FMA",
     # Unary ALU operations.

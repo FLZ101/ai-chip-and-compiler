@@ -39,6 +39,10 @@ class TestIsaParser(unittest.TestCase):
             [instr.op for instr in program], ["RCP", "RSQRT", "EXP2", "LOG2", "FMA"]
         )
 
+    def test_parse_integer_division(self):
+        program = parse_asm("IDIV R1, R2, R3")
+        self.assertEqual(program[0].op, "IDIV")
+
     def test_round_trip(self):
         # Round-tripping through the formatter must produce the same program.
         # This guarantees the MLIR backend can emit and reload ISA text later.
