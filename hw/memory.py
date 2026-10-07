@@ -64,8 +64,8 @@ class RegisterFile:
     """Per-thread virtual register file.
 
     A real GPU register file has a fixed width and hardware hazard tracking.
-    The MVP models the programmer-visible state only and leaves scoreboarding
-    to a later simulator milestone.
+    This class models the programmer-visible state; the per-lane scoreboard is
+    implemented by the execution core in ``hw/core.py``.
     """
 
     def __init__(self, count: int = 64):

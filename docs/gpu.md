@@ -356,7 +356,7 @@ Coalescing is one of the most important optimizations for GPU kernels.
 
 Shared memory is divided into banks. If multiple threads in a warp access different addresses that map to the same bank, the access is serialized.
 
-The simulator should eventually detect bank conflicts and report them in the timing model.
+The simulator detects bank conflicts and reports them in the timing model.
 
 ### 6.3 Cache behavior
 
@@ -535,8 +535,8 @@ by the MLIR compiler.
 
 - Measure cycles, memory traffic, occupancy, and stall reasons.
 - Optimize the actual bottleneck rather than guessing.
-- The simulator should eventually report cache hits, bank conflicts, and
-  stall reasons to support this workflow.
+- The simulator reports bank conflicts and stall reasons to support this
+  workflow. Cache hit/miss counters are a later enhancement.
 
 ---
 

@@ -70,8 +70,8 @@ REGISTER_DEST_OPS = {
 # different order from loads so the assembly remains close to typical SIMT ISAs:
 #   STG [addr], value
 MEMORY_DEST_OPS = {"STG", "STS"}
-# Opcodes that affect control flow.  Labels are resolved by the parser for a
-# future branch implementation; only EXIT/RET/BAR.SYNC are executed in the MVP.
+# Opcodes that affect control flow.  Labels are resolved by the parser and
+# used by the SIMT branch implementation in the execution core.
 CONTROL_OPS = {"BRA", "RET", "EXIT", "BAR.SYNC"}
 
 
@@ -259,8 +259,8 @@ def parse_asm(text: str) -> Program:
             continue
 
         if line.endswith(":"):
-            # Labels are recorded against the next instruction index.  They are
-            # currently unused by the MVP, but branches will resolve them later.
+            # Labels are recorded against the next instruction index and are
+            # resolved by the execution core when a BRA target is reached.
             label = line[:-1].strip()
             if label in labels:
                 raise ValueError(f"duplicate label: {label}")

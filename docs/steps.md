@@ -113,6 +113,8 @@ Exit criteria:
 
 ## Step 004: Timing model and performance counters
 
+Status: **done**
+
 Goal:
 
 - Move from "one instruction per cycle" to a simple stall-aware timing model.
@@ -134,6 +136,10 @@ Tests:
 Exit criteria:
 
 - Profile mode reports stable counters and plausible stall behavior.
+
+Reference:
+
+- [step-004.md](step-004.md)
 
 ---
 

@@ -2,8 +2,9 @@
 
 This document describes the first implemented vertical slice in the repository.
 Step 002 (branches, divergence, and reconvergence) and Step 003 (block barriers
-and multi-warp scheduling) are now also implemented. They are described in
-[step-002.md](step-002.md) and [step-003.md](step-003.md).
+and multi-warp scheduling), and Step 004 (timing model and performance counters)
+are now also implemented. They are described in [step-002.md](step-002.md),
+[step-003.md](step-003.md), and [step-004.md](step-004.md).
 
 The first milestone is intentionally narrow: prove that we can parse a small GPU ISA, model global/shared memory, execute a simple SIMT warp, and run an end-to-end vector-add program against a deterministic simulator.
 
@@ -172,14 +173,11 @@ python -m pip install -e '.[dev]'
 
 ## 5. What is intentionally not implemented yet
 
-The current simulator is the first vertical slice plus branch, barrier, and
-multi-warp support. It does not yet include:
+The current simulator is the first vertical slice plus branch, barrier,
+multi-warp, and timing-model support. It does not yet include:
 
 - multiple blocks per SM over time,
 - L1/L2 cache modeling,
-- memory latency and bandwidth,
-- warp stall reasons,
-- shared-memory bank-conflict detection,
 - tensor-core `MMA` execution,
 - FP16/BF16/FP8/INT8/INT4 support,
 - a Model IR or MLIR compiler pipeline.
@@ -201,11 +199,6 @@ Expected result: all current tests pass.
 
 ## 7. Next step
 
-The next step is to make the execution core more faithful to a modern GPU:
-
-1. Implement warp divergence and a simple reconvergence stack.
-2. Implement a real block barrier.
-3. Allow multiple warps per SM.
-4. Add the first timing counters: cycles, issued instructions, and stall reasons.
-
-After that, the project can begin the MLIR compiler foundation.
+The next step is to begin the compiler foundation: define a unified Model IR
+and a manual frontend for CNN and Transformer/LLM operators.  This is described
+as Step 005 in [steps.md](steps.md).
