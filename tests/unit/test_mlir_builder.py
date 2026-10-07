@@ -96,6 +96,31 @@ class TestMLIRBuilder(unittest.TestCase):
         ):
             self.assertIn(op_name, text)
 
+    def test_all_model_dtypes_have_stable_mlir_types(self):
+        expected = {
+            DType.F32: "f32",
+            DType.F16: "f16",
+            DType.BF16: "bf16",
+            DType.I32: "i32",
+            DType.I64: "i64",
+            DType.I8: "i8",
+            DType.U8: "ui8",
+            DType.I4: "i4",
+            DType.U4: "ui4",
+            DType.F8_E4M3: "f8E4M3FN",
+            DType.F8_E5M2: "f8E5M2",
+            DType.BOOL: "i1",
+        }
+
+        builder = MLIRBuilder()
+        for dtype, mlir_type in expected.items():
+            with self.subTest(dtype=dtype):
+                self.assertEqual(builder._scalar_type(dtype), mlir_type)
+
+    def test_unknown_dtype_is_rejected(self):
+        with self.assertRaises(MLIRBuilderError):
+            MLIRBuilder()._scalar_type("not_a_real_dtype")
+
 
 if __name__ == "__main__":
     unittest.main()
