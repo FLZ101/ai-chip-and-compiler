@@ -8,6 +8,7 @@ config.suffixes = [".mlir"]
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = config.test_source_root
 config.test_format = lit.formats.ShTest(False)
+root = os.path.abspath(os.path.join(config.test_source_root, "..", ".."))
 
 python = sys.executable
 filecheck = os.path.join(os.path.dirname(sys.executable), "filecheck")
@@ -16,3 +17,11 @@ if not os.path.exists(filecheck):
 
 config.substitutions.append(("%python", python))
 config.substitutions.append(("%filecheck", filecheck))
+config.substitutions.append(
+    (
+        "%mgpu_opt",
+        os.environ.get(
+            "MGPU_OPT", os.path.join(root, ".deps", "mgpu-build", "bin", "mgpu-opt")
+        ),
+    )
+)

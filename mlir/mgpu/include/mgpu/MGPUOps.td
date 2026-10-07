@@ -29,6 +29,7 @@ class MGPU_Op<string mnemonic, list<Trait> traits = []>
 
 def MGPU_LaunchOp : MGPU_Op<"launch", [NoMemoryEffect]> {
   let summary = "Launch one thread block";
+  let hasVerifier = 1;
   let arguments = (ins Index:$blockSizeX,
                        Index:$blockSizeY,
                        Index:$blockSizeZ,
@@ -46,6 +47,7 @@ def MGPU_LaunchOp : MGPU_Op<"launch", [NoMemoryEffect]> {
 
 def MGPU_ThreadIdOp : MGPU_Op<"thread_id", [Pure]> {
   let summary = "Return a thread index component";
+  let hasVerifier = 1;
   let arguments = (ins I32Attr:$dim);
   let results = (outs Index:$result);
   let assemblyFormat = "$dim attr-dict `:` type($result)";
@@ -53,6 +55,7 @@ def MGPU_ThreadIdOp : MGPU_Op<"thread_id", [Pure]> {
 
 def MGPU_BlockIdOp : MGPU_Op<"block_id", [Pure]> {
   let summary = "Return a block index component";
+  let hasVerifier = 1;
   let arguments = (ins I32Attr:$dim);
   let results = (outs Index:$result);
   let assemblyFormat = "$dim attr-dict `:` type($result)";
@@ -60,6 +63,7 @@ def MGPU_BlockIdOp : MGPU_Op<"block_id", [Pure]> {
 
 def MGPU_GridDimOp : MGPU_Op<"grid_dim", [Pure]> {
   let summary = "Return a grid dimension component";
+  let hasVerifier = 1;
   let arguments = (ins I32Attr:$dim);
   let results = (outs Index:$result);
   let assemblyFormat = "$dim attr-dict `:` type($result)";
@@ -67,6 +71,7 @@ def MGPU_GridDimOp : MGPU_Op<"grid_dim", [Pure]> {
 
 def MGPU_BlockDimOp : MGPU_Op<"block_dim", [Pure]> {
   let summary = "Return a block dimension component";
+  let hasVerifier = 1;
   let arguments = (ins I32Attr:$dim);
   let results = (outs Index:$result);
   let assemblyFormat = "$dim attr-dict `:` type($result)";
@@ -105,6 +110,7 @@ def MGPU_MmaOp : MGPU_Op<"mma", [Pure]> {
 
 def MGPU_ReturnOp : MGPU_Op<"return", [Terminator]> {
   let summary = "Terminator for an mgpu.launch region";
+  let hasVerifier = 1;
   let assemblyFormat = "attr-dict";
 }
 

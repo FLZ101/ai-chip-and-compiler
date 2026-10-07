@@ -149,18 +149,10 @@ class MLIRBuilder:
 
     def _emit_launch_ids(self, suffix: str, indent: str) -> list[str]:
         return [
-            f"{indent}%tx_{suffix} = mgpu.thread_id x",
-            f"{indent}%ty_{suffix} = mgpu.thread_id y",
-            f"{indent}%tz_{suffix} = mgpu.thread_id z",
-            f"{indent}%bx_{suffix} = mgpu.block_id x",
-            f"{indent}%by_{suffix} = mgpu.block_id y",
-            f"{indent}%bz_{suffix} = mgpu.block_id z",
-            f"{indent}%gx_{suffix} = mgpu.grid_dim x",
-            f"{indent}%gy_{suffix} = mgpu.grid_dim y",
-            f"{indent}%gz_{suffix} = mgpu.grid_dim z",
-            f"{indent}%bdx_{suffix} = mgpu.block_dim x",
-            f"{indent}%bdy_{suffix} = mgpu.block_dim y",
-            f"{indent}%bdz_{suffix} = mgpu.block_dim z",
+            f"{indent}%tx_{suffix} = mgpu.thread_id 0 : index",
+            f"{indent}%bx_{suffix} = mgpu.block_id 0 : index",
+            f"{indent}%gx_{suffix} = mgpu.grid_dim 0 : index",
+            f"{indent}%bdx_{suffix} = mgpu.block_dim 0 : index",
         ]
 
     def _emit_compute(self, node: Node, result_name: str, indent: str) -> list[str]:
@@ -248,8 +240,8 @@ class MLIRBuilder:
         arith_op = _BINARY_ARITH[node.op]
 
         return [
-            f"{indent}{result_name} = linalg.generic {{",
-            f"{indent}  indexing_maps = [{maps}]",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{maps}],",
             f"{indent}  iterator_types = [{iterator_types}]",
             f"{indent}}} ins({self._value_names[left.name]}, "
             f"{self._value_names[right.name]} : {left_type}, {right_type}) "
@@ -258,7 +250,7 @@ class MLIRBuilder:
             f"%out: {scalar_type}):",
             f"{indent}  %value = {arith_op} %lhs, %rhs : {scalar_type}",
             f"{indent}  linalg.yield %value : {scalar_type}",
-            f"{indent}}} -> {out_type}",
+            f"{indent}}}",
         ]
 
     def _emit_matmul(self, node: Node, result_name: str, indent: str) -> list[str]:
