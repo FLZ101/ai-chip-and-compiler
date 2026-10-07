@@ -84,6 +84,8 @@ def _concat_isa(
     first = layout[node.inputs[0].name]
     second = layout[node.inputs[1].name]
     output = layout[node.outputs[0].name]
+    if len(first.shape) == 4 and len(second.shape) == 4 and len(output.shape) == 4:
+        return _concat4d_isa(node, layout)
     if len(first.shape) != 1 or len(second.shape) != 1 or len(output.shape) != 1:
         raise NotImplementedError("concat lowering supports rank-1 tensors")
 
@@ -233,6 +235,8 @@ def _resize_isa(
 ) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
     value = layout[node.inputs[0].name]
     output = layout[node.outputs[0].name]
+    if len(value.shape) == 4 and len(output.shape) == 4:
+        return _resize4d_isa(node, layout)
     if len(value.shape) != 1 or len(output.shape) != 1:
         raise NotImplementedError("resize lowering supports rank-1 tensors")
 
@@ -262,6 +266,126 @@ MUL R7, R0, 4
 MOV R8, {output.base_addr}
 ADD R7, R7, R8
 STG [R7], R6
+BRA end
+end:
+EXIT
+"""
+    return isa, ((grid_x,), (block_size,))
+
+
+def _resize4d_isa(
+    node: Any, layout: dict[str, Any]
+) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
+    value = layout[node.inputs[0].name]
+    output = layout[node.outputs[0].name]
+    if value.shape[0] != 1 or output.shape[0] != 1:
+        raise NotImplementedError("resize4d lowering supports N=1")
+    n, c, h, w = value.shape
+    _, c_out, oh, ow = output.shape
+    if c != c_out:
+        raise NotImplementedError("resize4d channel counts must match")
+    total = c * oh * ow
+    block_size = 32
+    grid_x = math.ceil(total / block_size)
+    isa = f"""
+MOV R0, ctaid.x
+MUL R0, R0, ntid.x
+ADD R0, R0, tid.x
+MOV R1, {total}
+CMP.LT R2, R0, R1
+BRA body, R2, end
+BRA end
+body:
+IDIV R1, R0, {oh * ow}
+MUL R2, R1, {oh * ow}
+SUB R3, R0, R2
+IDIV R2, R3, {ow}
+MUL R4, R2, {ow}
+SUB R5, R3, R4
+MUL R6, R2, {h}
+IDIV R6, R6, {oh}
+MUL R7, R5, {w}
+IDIV R7, R7, {ow}
+MOV R8, R1
+MUL R8, R8, {h}
+ADD R8, R8, R6
+MUL R8, R8, {w}
+ADD R8, R8, R7
+MUL R8, R8, 4
+MOV R9, {value.base_addr}
+ADD R8, R8, R9
+LDG R10, [R8]
+MUL R11, R0, 4
+MOV R12, {output.base_addr}
+ADD R11, R11, R12
+STG [R11], R10
+BRA end
+end:
+EXIT
+"""
+    return isa, ((grid_x,), (block_size,))
+
+
+def _concat4d_isa(
+    node: Any, layout: dict[str, Any]
+) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
+    first = layout[node.inputs[0].name]
+    second = layout[node.inputs[1].name]
+    output = layout[node.outputs[0].name]
+    axis = int(node.attrs.get("axis", 1))
+    if axis != 1:
+        raise NotImplementedError("concat4d lowering supports channel axis only")
+    if first.shape[0] != 1 or second.shape[0] != 1:
+        raise NotImplementedError("concat4d lowering supports N=1")
+    c1 = first.shape[1]
+    c2 = second.shape[1]
+    h, w = first.shape[2], first.shape[3]
+    if (h, w) != (second.shape[2], second.shape[3]):
+        raise NotImplementedError("concat4d spatial shapes must match")
+    total = (c1 + c2) * h * w
+    hw = h * w
+    block_size = 32
+    grid_x = math.ceil(total / block_size)
+    isa = f"""
+MOV R0, ctaid.x
+MUL R0, R0, ntid.x
+ADD R0, R0, tid.x
+MOV R1, {total}
+CMP.LT R2, R0, R1
+BRA body, R2, end
+BRA end
+body:
+IDIV R1, R0, {hw}
+MUL R2, R1, {hw}
+SUB R3, R0, R2
+MOV R2, {c1}
+CMP.LT R4, R1, R2
+BRA first, R4, end
+BRA second
+first:
+MUL R5, R1, {hw}
+ADD R5, R5, R3
+MUL R5, R5, 4
+MOV R6, {first.base_addr}
+ADD R5, R5, R6
+LDG R7, [R5]
+BRA store
+second:
+MOV R5, R1
+MOV R6, {c1}
+SUB R5, R5, R6
+MUL R5, R5, {hw}
+ADD R5, R5, R3
+MUL R5, R5, 4
+MOV R6, {second.base_addr}
+ADD R5, R5, R6
+LDG R7, [R5]
+BRA store
+store:
+MUL R8, R0, 4
+MOV R9, {output.base_addr}
+ADD R8, R8, R9
+STG [R8], R7
 BRA end
 end:
 EXIT

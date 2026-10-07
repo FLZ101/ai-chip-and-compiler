@@ -97,10 +97,10 @@ def _lower_elementwise(
 
     if left.shape != right.shape or left.shape != output.shape:
         raise NotImplementedError("elementwise lowering requires equal shapes")
-    if len(left.shape) != 1:
-        raise NotImplementedError("elementwise lowering supports rank-1 tensors")
+    if left.shape != right.shape or left.shape != output.shape:
+        raise NotImplementedError("elementwise lowering requires equal shapes")
 
-    return _elementwise_isa(node, left, right, output, left.shape[0])
+    return _elementwise_isa(node, left, right, output, left.numel)
 
 
 def _reduction_identity(op: Op) -> float:

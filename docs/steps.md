@@ -464,6 +464,8 @@ Reference:
 
 ## Step 016: CNN/object-detection model examples
 
+Status: **done**
+
 Goal:
 
 - Validate the complete CNN path.
@@ -478,6 +480,10 @@ Examples:
 Exit criteria:
 
 - Full CNN/detector graphs compile and match reference.
+
+Reference:
+
+- [step-016.md](step-016.md)
 
 ---
 

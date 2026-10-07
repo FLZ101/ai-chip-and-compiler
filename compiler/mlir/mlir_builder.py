@@ -432,10 +432,6 @@ class MLIRBuilder:
         image, weight = node.inputs[:2]
         output = node.outputs[0]
         padding = _pair(node.attrs.get("padding", 0), "padding")
-        if padding != (0, 0):
-            raise MLIRBuilderError(
-                "MLIR conv2d lowering currently supports padding=0 only"
-            )
 
         strides = _pair(node.attrs.get("strides", 1), "strides")
         dilations = _pair(node.attrs.get("dilation", 1), "dilation")
@@ -458,10 +454,6 @@ class MLIRBuilder:
         image, weight = node.inputs[:2]
         output = node.outputs[0]
         padding = _pair(node.attrs.get("padding", 0), "padding")
-        if padding != (0, 0):
-            raise MLIRBuilderError(
-                "MLIR depthwise conv lowering currently supports padding=0 only"
-            )
         strides = _pair(node.attrs.get("strides", 1), "strides")
         dilations = _pair(node.attrs.get("dilation", 1), "dilation")
         image_type = self._memref_type(image)
