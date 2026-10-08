@@ -283,6 +283,66 @@ def MGPU_ResizeOp : MGPU_Op<"resize", [MemoryEffects<[MemRead, MemWrite]>]> {
   let assemblyFormat = "$input `,` $output attr-dict `:` type($input) `,` type($output)";
 }
 
+def MGPU_BatchNormOp : MGPU_Op<"batch_norm", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Batch normalization";
+  let arguments = (ins AnyMemRef:$x,
+                       AnyMemRef:$scale,
+                       AnyMemRef:$bias,
+                       AnyMemRef:$mean,
+                       AnyMemRef:$var,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = [{
+    $x `,` $scale `,` $bias `,` $mean `,` $var `,` $output
+    attr-dict
+    `:` type($x) `,` type($scale) `,` type($bias) `,` type($mean) `,` type($var) `,` type($output)
+  }];
+}
+
+def MGPU_GroupNormOp : MGPU_Op<"group_norm", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Group normalization";
+  let arguments = (ins AnyMemRef:$x,
+                       AnyMemRef:$weight,
+                       AnyMemRef:$bias,
+                       AnyMemRef:$output,
+                       I64Attr:$numGroups);
+  let results = (outs);
+  let assemblyFormat = [{
+    $x `,` $weight `,` $bias `,` $output
+    `num_groups` `=` $numGroups
+    attr-dict
+    `:` type($x) `,` type($weight) `,` type($bias) `,` type($output)
+  }];
+}
+
+def MGPU_BoxDecodeOp : MGPU_Op<"box_decode", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Decode detection box deltas";
+  let arguments = (ins AnyMemRef:$boxes,
+                       AnyMemRef:$deltas,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = [{
+    $boxes `,` $deltas `,` $output
+    attr-dict
+    `:` type($boxes) `,` type($deltas) `,` type($output)
+  }];
+}
+
+def MGPU_NMSOp : MGPU_Op<"nms", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Greedy non-maximum suppression";
+  let arguments = (ins AnyMemRef:$boxes,
+                       AnyMemRef:$scores,
+                       AnyMemRef:$output,
+                       F32Attr:$iouThreshold);
+  let results = (outs);
+  let assemblyFormat = [{
+    $boxes `,` $scores `,` $output
+    `iou_threshold` `=` $iouThreshold
+    attr-dict
+    `:` type($boxes) `,` type($scores) `,` type($output)
+  }];
+}
+
 def MGPU_QuantOp : MGPU_Op<"quant", [Pure]> {
   let summary = "Quantize a value using scale and zero point";
   let arguments = (ins AnyType:$input,

@@ -685,6 +685,162 @@ module {
         )
         np.testing.assert_array_equal(actual, np.repeat(x, 2))
 
+    def test_batch_norm_uses_mgpu_opt(self):
+        x = np.arange(1 * 2 * 2 * 2, dtype=np.float32).reshape(1, 2, 2, 2)
+        scale = np.array([1.0, 2.0], dtype=np.float32)
+        bias = np.array([0.5, -0.5], dtype=np.float32)
+        mean = np.array([1.0, 2.0], dtype=np.float32)
+        var = np.array([0.5, 1.0], dtype=np.float32)
+        frontend = ManualFrontend("batch_norm")
+        xv = frontend.add_input("x", DType.F32, x.shape)
+        sv = frontend.add_input("s", DType.F32, scale.shape)
+        bv = frontend.add_input("b", DType.F32, bias.shape)
+        mv = frontend.add_input("m", DType.F32, mean.shape)
+        vv = frontend.add_input("v", DType.F32, var.shape)
+        frontend.output(frontend.batch_norm(xv, sv, bv, mv, vv))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.reshape(-1).tolist())
+        device.global_memory.load_floats(x.nbytes, scale.tolist())
+        device.global_memory.load_floats(x.nbytes + scale.nbytes, bias.tolist())
+        device.global_memory.load_floats(
+            x.nbytes + scale.nbytes + bias.nbytes, mean.tolist()
+        )
+        device.global_memory.load_floats(
+            x.nbytes + scale.nbytes + bias.nbytes + mean.nbytes, var.tolist()
+        )
+        output_base = x.nbytes + scale.nbytes + bias.nbytes + mean.nbytes + var.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * x.size)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, x.size), dtype=np.float32
+        ).reshape(x.shape)
+        expected = (x - mean.reshape(1, -1, 1, 1)) / np.sqrt(
+            var.reshape(1, -1, 1, 1) + 1e-5
+        ) * scale.reshape(1, -1, 1, 1) + bias.reshape(1, -1, 1, 1)
+        np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
+    def test_group_norm_uses_mgpu_opt(self):
+        x = np.arange(1 * 2 * 2 * 2, dtype=np.float32).reshape(1, 2, 2, 2)
+        weight = np.array([1.0, 2.0], dtype=np.float32)
+        bias = np.array([0.0, 1.0], dtype=np.float32)
+        frontend = ManualFrontend("group_norm")
+        xv = frontend.add_input("x", DType.F32, x.shape)
+        wv = frontend.add_input("w", DType.F32, weight.shape)
+        bv = frontend.add_input("b", DType.F32, bias.shape)
+        frontend.output(frontend.group_norm(xv, wv, bv, num_groups=2))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.reshape(-1).tolist())
+        device.global_memory.load_floats(x.nbytes, weight.tolist())
+        device.global_memory.load_floats(x.nbytes + weight.nbytes, bias.tolist())
+        output_base = x.nbytes + weight.nbytes + bias.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * x.size)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, x.size), dtype=np.float32
+        ).reshape(x.shape)
+
+        channels_per_group = x.shape[1] // 2
+        expected = np.zeros_like(x)
+        for group in range(2):
+            start = group * channels_per_group
+            end = start + channels_per_group
+            group_x = x[:, start:end, :, :]
+            mean = group_x.mean()
+            var = group_x.var()
+            expected[:, start:end, :, :] = (group_x - mean) / np.sqrt(
+                var + 1e-5
+            ) * weight[start:end].reshape(1, -1, 1, 1) + bias[start:end].reshape(
+                1, -1, 1, 1
+            )
+        np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
+    def test_box_decode_uses_mgpu_opt(self):
+        boxes = np.array(
+            [[10.0, 20.0, 4.0, 6.0], [30.0, 40.0, 2.0, 8.0]], dtype=np.float32
+        )
+        deltas = np.array(
+            [[0.0, 0.0, 0.0, 0.0], [0.1, -0.1, 0.2, -0.2]], dtype=np.float32
+        )
+        frontend = ManualFrontend("box_decode")
+        bv = frontend.add_input("boxes", DType.F32, boxes.shape)
+        dv = frontend.add_input("deltas", DType.F32, deltas.shape)
+        frontend.output(frontend.box_decode(bv, dv))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, boxes.reshape(-1).tolist())
+        device.global_memory.load_floats(boxes.nbytes, deltas.reshape(-1).tolist())
+        output_base = boxes.nbytes + deltas.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * boxes.size)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, boxes.size),
+            dtype=np.float32,
+        ).reshape(boxes.shape)
+        cx = boxes[:, 0] + deltas[:, 0] * boxes[:, 2]
+        cy = boxes[:, 1] + deltas[:, 1] * boxes[:, 3]
+        w = boxes[:, 2] * np.exp(deltas[:, 2])
+        h = boxes[:, 3] * np.exp(deltas[:, 3])
+        expected = np.stack(
+            [cx - 0.5 * w, cy - 0.5 * h, cx + 0.5 * w, cy + 0.5 * h], axis=1
+        ).astype(np.float32)
+        np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
+    def test_nms_uses_mgpu_opt(self):
+        boxes = np.array(
+            [[0.0, 0.0, 2.0, 2.0], [1.0, 1.0, 3.0, 3.0], [5.0, 5.0, 7.0, 7.0]],
+            dtype=np.float32,
+        )
+        scores = np.array([0.9, 0.8, 0.7], dtype=np.float32)
+        frontend = ManualFrontend("nms")
+        bv = frontend.add_input("boxes", DType.F32, boxes.shape)
+        sv = frontend.add_input("scores", DType.F32, scores.shape)
+        frontend.output(frontend.nms(bv, sv, iou_threshold=0.5))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, boxes.reshape(-1).tolist())
+        device.global_memory.load_floats(boxes.nbytes, scores.tolist())
+        output_base = boxes.nbytes + scores.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * len(scores))
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, len(scores)),
+            dtype=np.float32,
+        )
+
+        def iou(a, b):
+            x1 = max(a[0], b[0])
+            y1 = max(a[1], b[1])
+            x2 = min(a[2], b[2])
+            y2 = min(a[3], b[3])
+            inter = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
+            area_a = (a[2] - a[0]) * (a[3] - a[1])
+            area_b = (b[2] - b[0]) * (b[3] - b[1])
+            return inter / max(area_a + area_b - inter, 1.0)
+
+        keep = np.ones(len(boxes), dtype=np.float32)
+        for i in range(len(boxes)):
+            for j in range(len(boxes)):
+                if scores[j] > scores[i] and iou(boxes[i], boxes[j]) > 0.5:
+                    keep[i] = 0.0
+        expected = np.where(keep, np.arange(len(boxes), dtype=np.float32), -1.0).astype(
+            np.float32
+        )
+        np.testing.assert_array_equal(actual, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

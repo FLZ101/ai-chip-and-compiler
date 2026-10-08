@@ -645,8 +645,46 @@ class MLIRBuilder:
     def _emit_norm_detection_placeholder(
         self, node: Node, result_name: str, indent: str
     ) -> list[str]:
-        value = node.inputs[0]
         output = node.outputs[0]
+        out_type = self._memref_type(output)
+        if node.op == Op.BATCH_NORM:
+            x, scale, bias, mean, var = node.inputs
+            return [
+                f"{indent}mgpu.batch_norm {self._value_names[x.name]}, "
+                f"{self._value_names[scale.name]}, {self._value_names[bias.name]}, "
+                f"{self._value_names[mean.name]}, {self._value_names[var.name]}, "
+                f"{result_name} : {self._memref_type(x)}, {self._memref_type(scale)}, "
+                f"{self._memref_type(bias)}, {self._memref_type(mean)}, "
+                f"{self._memref_type(var)}, {out_type}"
+            ]
+        if node.op == Op.GROUP_NORM:
+            x, weight, bias = node.inputs
+            num_groups = int(node.attrs.get("num_groups", 1))
+            return [
+                f"{indent}mgpu.group_norm {self._value_names[x.name]}, "
+                f"{self._value_names[weight.name]}, {self._value_names[bias.name]}, "
+                f"{result_name} num_groups = {num_groups} : "
+                f"{self._memref_type(x)}, {self._memref_type(weight)}, "
+                f"{self._memref_type(bias)}, {out_type}"
+            ]
+        if node.op == Op.BOX_DECODE:
+            boxes, deltas = node.inputs
+            return [
+                f"{indent}mgpu.box_decode {self._value_names[boxes.name]}, "
+                f"{self._value_names[deltas.name]}, {result_name} : "
+                f"{self._memref_type(boxes)}, {self._memref_type(deltas)}, {out_type}"
+            ]
+        if node.op == Op.NMS:
+            boxes, scores = node.inputs
+            threshold = float(node.attrs.get("iou_threshold", 0.5))
+            return [
+                f"{indent}mgpu.nms {self._value_names[boxes.name]}, "
+                f"{self._value_names[scores.name]}, {result_name} "
+                f"iou_threshold = {threshold!r} : {self._memref_type(boxes)}, "
+                f"{self._memref_type(scores)}, {out_type}"
+            ]
+
+        value = node.inputs[0]
         scalar_type = self._scalar_type(output.dtype)
         value_type = self._memref_type(value)
         out_type = self._memref_type(output)

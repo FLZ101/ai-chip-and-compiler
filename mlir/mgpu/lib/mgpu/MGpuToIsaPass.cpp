@@ -281,6 +281,38 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->grid),
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
+      } else if (auto isa = emitBatchNormIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitGroupNormIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitBoxDecodeIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitNmsIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
       } else if (auto isa = emitAttentionIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
@@ -1629,6 +1661,347 @@ struct MGpuToIsaPass
     IsaText isa;
     isa.code = code;
     isa.grid = std::to_string((outputLen + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitBatchNormIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::BatchNormOp> ops;
+    launch.getBody().front().walk(
+        [&](mgpu::BatchNormOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    auto xType = dyn_cast<MemRefType>(op.getX().getType());
+    auto scaleType = dyn_cast<MemRefType>(op.getScale().getType());
+    auto biasType = dyn_cast<MemRefType>(op.getBias().getType());
+    auto meanType = dyn_cast<MemRefType>(op.getMean().getType());
+    auto varType = dyn_cast<MemRefType>(op.getVar().getType());
+    auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!xType || !scaleType || !biasType || !meanType || !varType ||
+        !outType || xType.getRank() != 4)
+      return std::nullopt;
+
+    int64_t c = xType.getShape()[1];
+    int64_t h = xType.getShape()[2];
+    int64_t w = xType.getShape()[3];
+    int64_t hw = h * w;
+    int64_t total = c * hw;
+    int64_t xBase = 0;
+    int64_t scaleBase = memrefByteSize(xType);
+    int64_t biasBase = scaleBase + memrefByteSize(scaleType);
+    int64_t meanBase = biasBase + memrefByteSize(biasType);
+    int64_t varBase = meanBase + memrefByteSize(meanType);
+    int64_t outBase = varBase + memrefByteSize(varType);
+    double eps = 1e-5;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, total);
+    os << "IDIV R1, R0, " << hw << "\n"
+       << "MUL R3, R1, " << hw << "\n"
+       << "SUB R2, R0, R3\n"
+       << "MUL R3, R1, 4\n"
+       << "ADD R3, R3, " << meanBase << "\n"
+       << "LDG R5, [R3]\n"
+       << "MUL R6, R1, 4\n"
+       << "ADD R6, R6, " << varBase << "\n"
+       << "LDG R8, [R6]\n"
+       << "ADD R8, R8, " << eps << "\n"
+       << "RSQRT R8, R8\n"
+       << "MUL R6, R0, 4\n"
+       << "ADD R6, R6, " << xBase << "\n"
+       << "LDG R9, [R6]\n"
+       << "SUB R9, R9, R5\n"
+       << "MUL R9, R9, R8\n"
+       << "MUL R10, R1, 4\n"
+       << "ADD R10, R10, " << scaleBase << "\n"
+       << "LDG R12, [R10]\n"
+       << "MUL R9, R9, R12\n"
+       << "MUL R10, R1, 4\n"
+       << "ADD R10, R10, " << biasBase << "\n"
+       << "LDG R12, [R10]\n"
+       << "ADD R9, R9, R12\n"
+       << "MUL R10, R0, 4\n"
+       << "ADD R10, R10, " << outBase << "\n"
+       << "STG [R10], R9\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitGroupNormIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::GroupNormOp> ops;
+    launch.getBody().front().walk(
+        [&](mgpu::GroupNormOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    auto xType = dyn_cast<MemRefType>(op.getX().getType());
+    auto weightType = dyn_cast<MemRefType>(op.getWeight().getType());
+    auto biasType = dyn_cast<MemRefType>(op.getBias().getType());
+    auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!xType || !weightType || !biasType || !outType || xType.getRank() != 4)
+      return std::nullopt;
+
+    int64_t c = xType.getShape()[1];
+    int64_t h = xType.getShape()[2];
+    int64_t w = xType.getShape()[3];
+    int64_t groups = op.getNumGroups();
+    if (c % groups != 0)
+      return std::nullopt;
+    int64_t channelsPerGroup = c / groups;
+    int64_t hw = h * w;
+    int64_t count = channelsPerGroup * hw;
+    int64_t total = c * hw;
+    int64_t xBase = 0;
+    int64_t weightBase = memrefByteSize(xType);
+    int64_t biasBase = weightBase + memrefByteSize(weightType);
+    int64_t outBase = biasBase + memrefByteSize(biasType);
+    double eps = 1e-5;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, total);
+    os << "IDIV R1, R0, " << hw << "\n"
+       << "MUL R3, R1, " << hw << "\n"
+       << "SUB R2, R0, R3\n"
+       << "IDIV R26, R1, " << channelsPerGroup << "\n"
+       << "MOV R21, 0\n"
+       << "MOV R22, 0\n";
+    for (int64_t channel = 0; channel < c; ++channel) {
+      int64_t group = channel / channelsPerGroup;
+      for (int64_t ih = 0; ih < h; ++ih) {
+        for (int64_t iw = 0; iw < w; ++iw) {
+          int64_t idx = channel * hw + ih * w + iw;
+          os << "MOV R3, " << group << "\n"
+             << "CMP.EQ R4, R26, R3\n"
+             << "MOV R3, " << idx << "\n"
+             << "MUL R3, R3, 4\n"
+             << "ADD R3, R3, " << xBase << "\n"
+             << "LDG R6, [R3]\n"
+             << "MUL R7, R6, R4\n"
+             << "ADD R21, R21, R7\n"
+             << "MUL R6, R6, R6\n"
+             << "MUL R6, R6, R4\n"
+             << "ADD R22, R22, R6\n";
+        }
+      }
+    }
+    os << "MOV R3, " << count << "\n"
+       << "DIV R23, R21, R3\n"
+       << "DIV R24, R22, R3\n"
+       << "MUL R25, R23, R23\n"
+       << "SUB R24, R24, R25\n"
+       << "ADD R24, R24, " << eps << "\n"
+       << "RSQRT R24, R24\n"
+       << "IDIV R3, R2, " << w << "\n"
+       << "MUL R4, R3, " << w << "\n"
+       << "SUB R5, R2, R4\n"
+       << "MOV R6, " << h << "\n"
+       << "MUL R6, R1, R6\n"
+       << "ADD R6, R6, R3\n"
+       << "MUL R6, R6, " << w << "\n"
+       << "ADD R6, R6, R5\n"
+       << "MUL R6, R6, 4\n"
+       << "ADD R6, R6, " << xBase << "\n"
+       << "LDG R8, [R6]\n"
+       << "SUB R8, R8, R23\n"
+       << "MUL R8, R8, R24\n"
+       << "MUL R9, R1, 4\n"
+       << "ADD R9, R9, " << weightBase << "\n"
+       << "LDG R11, [R9]\n"
+       << "MUL R8, R8, R11\n"
+       << "MUL R9, R1, 4\n"
+       << "ADD R9, R9, " << biasBase << "\n"
+       << "LDG R11, [R9]\n"
+       << "ADD R8, R8, R11\n"
+       << "MUL R9, R0, 4\n"
+       << "ADD R9, R9, " << outBase << "\n"
+       << "STG [R9], R8\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitBoxDecodeIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::BoxDecodeOp> ops;
+    launch.getBody().front().walk(
+        [&](mgpu::BoxDecodeOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    auto boxesType = dyn_cast<MemRefType>(op.getBoxes().getType());
+    auto deltasType = dyn_cast<MemRefType>(op.getDeltas().getType());
+    auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!boxesType || !deltasType || !outType || boxesType.getRank() != 2 ||
+        boxesType.getShape()[1] != 4)
+      return std::nullopt;
+    int64_t n = boxesType.getShape()[0];
+    int64_t total = n * 4;
+    int64_t boxesBase = 0;
+    int64_t deltasBase = memrefByteSize(boxesType);
+    int64_t outBase = deltasBase + memrefByteSize(deltasType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, total);
+    os << "IDIV R1, R0, 4\n"
+       << "MUL R2, R1, 4\n"
+       << "SUB R3, R0, R2\n";
+    // Load box components and deltas into R20..R27.
+    for (int i = 0; i < 4; ++i) {
+      os << "MUL R4, R1, 4\n"
+         << "ADD R4, R4, " << i << "\n"
+         << "MUL R4, R4, 4\n"
+         << "ADD R4, R4, " << boxesBase << "\n"
+         << "LDG R" << (20 + i) << ", [R4]\n"
+         << "MUL R4, R1, 4\n"
+         << "ADD R4, R4, " << i << "\n"
+         << "MUL R4, R4, 4\n"
+         << "ADD R4, R4, " << deltasBase << "\n"
+         << "LDG R" << (24 + i) << ", [R4]\n";
+    }
+    os << "MUL R4, R24, R22\n"
+       << "ADD R4, R20, R4\n"
+       << "MUL R5, R25, R23\n"
+       << "ADD R5, R21, R5\n"
+       << "MUL R6, R26, 1.4426950408889634\n"
+       << "EXP2 R6, R6\n"
+       << "MUL R7, R22, R6\n"
+       << "MUL R8, R27, 1.4426950408889634\n"
+       << "EXP2 R8, R8\n"
+       << "MUL R9, R23, R8\n"
+       << "MUL R10, R7, 0.5\n"
+       << "SUB R28, R4, R10\n"
+       << "ADD R29, R4, R10\n"
+       << "MUL R11, R9, 0.5\n"
+       << "SUB R30, R5, R11\n"
+       << "ADD R31, R5, R11\n"
+       << "MOV R27, 0\n"
+       << "CMP.EQ R12, R3, 0\n"
+       << "MUL R13, R12, R28\n"
+       << "ADD R27, R27, R13\n"
+       << "CMP.EQ R14, R3, 1\n"
+       << "MUL R15, R14, R30\n"
+       << "ADD R27, R27, R15\n"
+       << "CMP.EQ R16, R3, 2\n"
+       << "MUL R17, R16, R29\n"
+       << "ADD R27, R27, R17\n"
+       << "CMP.EQ R18, R3, 3\n"
+       << "MUL R19, R18, R31\n"
+       << "ADD R27, R27, R19\n"
+       << "MUL R20, R0, 4\n"
+       << "ADD R20, R20, " << outBase << "\n"
+       << "STG [R20], R27\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitNmsIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::NMSOp> ops;
+    launch.getBody().front().walk([&](mgpu::NMSOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    auto boxesType = dyn_cast<MemRefType>(op.getBoxes().getType());
+    auto scoresType = dyn_cast<MemRefType>(op.getScores().getType());
+    auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!boxesType || !scoresType || !outType || boxesType.getRank() != 2 ||
+        boxesType.getShape()[1] != 4 || scoresType.getRank() != 1)
+      return std::nullopt;
+    int64_t numBoxes = boxesType.getShape()[0];
+    int64_t boxesBase = 0;
+    int64_t scoresBase = memrefByteSize(boxesType);
+    int64_t outBase = scoresBase + memrefByteSize(scoresType);
+    double threshold = op.getIouThreshold().convertToDouble();
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, numBoxes);
+    os << "MOV R31, R0\n"
+       << "MUL R4, R0, 4\n"
+       << "ADD R4, R4, " << scoresBase << "\n"
+       << "LDG R20, [R4]\n";
+    for (int i = 0; i < 4; ++i) {
+      os << "MUL R4, R0, 4\n"
+         << "ADD R4, R4, " << i << "\n"
+         << "MUL R4, R4, 4\n"
+         << "ADD R4, R4, " << boxesBase << "\n"
+         << "LDG R" << (21 + i) << ", [R4]\n";
+    }
+    os << "MOV R30, 1\n";
+    for (int64_t j = 0; j < numBoxes; ++j) {
+      os << "MOV R4, " << j << "\n"
+         << "MUL R4, R4, 4\n"
+         << "ADD R4, R4, " << scoresBase << "\n"
+         << "LDG R6, [R4]\n"
+         << "CMP.GT R7, R6, R20\n";
+      for (int i = 0; i < 4; ++i) {
+        os << "MOV R4, " << (j * 4 + i) << "\n"
+           << "MUL R4, R4, 4\n"
+           << "ADD R4, R4, " << boxesBase << "\n"
+           << "LDG R" << (8 + i) << ", [R4]\n";
+      }
+      os << "MAX R12, R21, R8\n"
+         << "MAX R13, R22, R9\n"
+         << "MIN R14, R23, R10\n"
+         << "MIN R15, R24, R11\n"
+         << "SUB R16, R14, R12\n"
+         << "MOV R17, 0\n"
+         << "MAX R16, R16, R17\n"
+         << "SUB R18, R15, R13\n"
+         << "MAX R18, R18, R17\n"
+         << "MUL R16, R16, R18\n"
+         << "SUB R4, R23, R21\n"
+         << "SUB R5, R24, R22\n"
+         << "MUL R6, R4, R5\n"
+         << "SUB R4, R10, R8\n"
+         << "SUB R5, R11, R9\n"
+         << "MUL R4, R4, R5\n"
+         << "ADD R5, R6, R4\n"
+         << "SUB R5, R5, R16\n"
+         << "MOV R8, 1\n"
+         << "MAX R5, R5, R8\n"
+         << "DIV R9, R16, R5\n"
+         << "CMP.GT R10, R9, " << threshold << "\n"
+         << "MUL R11, R7, R10\n"
+         << "MOV R12, 1\n"
+         << "SUB R12, R12, R11\n"
+         << "MUL R30, R30, R12\n";
+    }
+    os << "MOV R4, R31\n"
+       << "MOV R5, -1\n"
+       << "SEL R6, R30, R4, R5\n"
+       << "MUL R7, R0, 4\n"
+       << "ADD R7, R7, " << outBase << "\n"
+       << "STG [R7], R6\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((numBoxes + 31) / 32) + "x1x1";
     isa.block = "32x1x1";
     return isa;
   }

@@ -213,6 +213,8 @@ Exit criteria:
 
 ### Phase 7: Normalization and detection
 
+Status: **done**
+
 Lower:
 
 - batch norm,
