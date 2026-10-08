@@ -125,6 +125,8 @@ Exit criteria:
 
 ### Phase 2: Activations
 
+Status: **done**
+
 Use linalg/arith decomposition for:
 
 - relu,

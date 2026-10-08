@@ -1,6 +1,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/IR/Builders.h"
@@ -88,7 +89,8 @@ struct MGpuToIsaPass
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect, linalg::LinalgDialect,
-                    memref::MemRefDialect, mgpu::MGPUDialect>();
+                    math::MathDialect, memref::MemRefDialect,
+                    mgpu::MGPUDialect>();
   }
 
   StringRef getArgument() const final { return "mgpu-to-isa"; }
@@ -112,6 +114,14 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
       } else if (auto isa = emitLinalgGenericIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitActivationIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
             launch.getLoc(),
@@ -406,6 +416,139 @@ struct MGpuToIsaPass
     isa.grid = "1x1x1";
     isa.block = "32x1x1";
     return isa;
+  }
+
+  enum class ActivationKind { Relu, LeakyRelu, Sigmoid, Silu, Gelu };
+
+  static std::optional<ActivationKind>
+  detectActivationKind(linalg::GenericOp generic) {
+    bool hasTanh = false;
+    bool hasSelect = false;
+    bool hasExp = false;
+    bool hasDiv = false;
+    bool hasMaximum = false;
+    bool hasMul = false;
+    generic.getRegion().walk([&](Operation *op) {
+      if (isa<math::TanhOp>(op))
+        hasTanh = true;
+      else if (isa<arith::SelectOp>(op))
+        hasSelect = true;
+      else if (isa<math::ExpOp>(op))
+        hasExp = true;
+      else if (isa<arith::DivFOp>(op))
+        hasDiv = true;
+      else if (isa<arith::MaximumFOp>(op))
+        hasMaximum = true;
+      else if (isa<arith::MulFOp>(op))
+        hasMul = true;
+    });
+
+    if (hasTanh)
+      return ActivationKind::Gelu;
+    if (hasSelect)
+      return ActivationKind::LeakyRelu;
+    if (hasExp)
+      return hasMul ? ActivationKind::Silu : ActivationKind::Sigmoid;
+    if (hasMaximum)
+      return ActivationKind::Relu;
+    return std::nullopt;
+  }
+
+  static void emitActivationBody(llvm::raw_ostream &os, ActivationKind kind) {
+    if (kind == ActivationKind::Relu) {
+      os << "MAX R6, R5, 0\n";
+      return;
+    }
+    if (kind == ActivationKind::LeakyRelu) {
+      os << "CMP.LT R7, R5, 0\n"
+         << "MUL R8, R5, 0.01\n"
+         << "SEL R6, R7, R8, R5\n";
+      return;
+    }
+    if (kind == ActivationKind::Sigmoid || kind == ActivationKind::Silu) {
+      os << "MUL R7, R5, -1.4426950408889634\n"
+         << "EXP2 R8, R7\n"
+         << "MOV R9, 1\n"
+         << "ADD R10, R8, R9\n"
+         << "RCP R6, R10\n";
+      if (kind == ActivationKind::Silu)
+        os << "MUL R6, R5, R6\n";
+      return;
+    }
+    if (kind == ActivationKind::Gelu) {
+      os << "MUL R7, R5, R5\n"
+         << "MUL R8, R7, R5\n"
+         << "MUL R8, R8, 0.044715\n"
+         << "ADD R8, R8, R5\n"
+         << "MUL R8, R8, 0.7978845608028654\n"
+         << "MUL R9, R8, 2\n"
+         << "MUL R9, R9, -1.4426950408889634\n"
+         << "EXP2 R10, R9\n"
+         << "MOV R11, 1\n"
+         << "ADD R12, R10, R11\n"
+         << "RCP R13, R12\n"
+         << "MUL R13, R13, 2\n"
+         << "MOV R14, 1\n"
+         << "SUB R13, R13, R14\n"
+         << "MOV R14, 1\n"
+         << "ADD R14, R14, R13\n"
+         << "MUL R6, R5, R14\n"
+         << "MUL R6, R6, 0.5\n";
+      return;
+    }
+  }
+
+  std::optional<IsaText> emitActivationIsa(mgpu::LaunchOp launch) {
+    SmallVector<linalg::GenericOp> generics;
+    launch.getBody().front().walk(
+        [&](linalg::GenericOp generic) { generics.push_back(generic); });
+
+    for (linalg::GenericOp generic : generics) {
+      auto kind = detectActivationKind(generic);
+      if (!kind)
+        continue;
+
+      auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+      if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().empty())
+        continue;
+
+      auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+      auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+      if (!inputType || !outputType || inputType.getRank() != 1 ||
+          outputType.getRank() != 1 || inputType.getShape()[0] != outputType.getShape()[0])
+        continue;
+
+      int64_t n = outputType.getShape()[0];
+      int64_t outputDelta = n * 4;
+      int64_t blockSize = 32;
+      int64_t gridX = (n + blockSize - 1) / blockSize;
+
+      std::string code;
+      llvm::raw_string_ostream os(code);
+      os << "MOV R0, ctaid.x\n"
+         << "MUL R0, R0, ntid.x\n"
+         << "ADD R0, R0, tid.x\n"
+         << "MOV R1, " << n << "\n"
+         << "CMP.LT R2, R0, R1\n"
+         << "BRA body, R2, end\n"
+         << "BRA end\n"
+         << "body:\n"
+         << "MUL R3, R0, 4\n"
+         << "LDG R5, [R3]\n";
+      emitActivationBody(os, *kind);
+      os << "STG [R3 + " << outputDelta << "], R6\n"
+         << "BRA end\n"
+         << "end:\n"
+         << "EXIT\n";
+      os.flush();
+
+      IsaText isa;
+      isa.code = code;
+      isa.grid = std::to_string(gridX) + "x1x1";
+      isa.block = std::to_string(blockSize) + "x1x1";
+      return isa;
+    }
+    return std::nullopt;
   }
 
   static void emitFragmentLoad(llvm::raw_ostream &os, int dest, int rowGroup,

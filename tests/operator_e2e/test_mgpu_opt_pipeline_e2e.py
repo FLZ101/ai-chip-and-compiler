@@ -123,6 +123,56 @@ class TestMgpuOptPipelineEndToEnd(unittest.TestCase):
             with self.subTest(op=op_name):
                 self._run_reduction_via_mgpu_opt(op_name, 8)
 
+    def _run_activation_via_mgpu_opt(self, op_name: str, n: int):
+        frontend = ManualFrontend(op_name)
+        x = frontend.add_input("x", DType.F32, (n,))
+        if op_name == "relu":
+            output = frontend.relu(x)
+        elif op_name == "leaky_relu":
+            output = frontend.leaky_relu(x)
+        elif op_name == "silu":
+            output = frontend.silu(x)
+        elif op_name == "gelu":
+            output = frontend.gelu(x)
+        else:
+            output = frontend.sigmoid(x)
+        frontend.output(output)
+        graph = frontend.build()
+
+        result = run_mgpu_pipeline(MLIRBuilder().build(graph))
+        data = np.linspace(-2.0, 2.0, n, dtype=np.float32)
+        if op_name == "relu":
+            expected = np.maximum(data, 0.0)
+        elif op_name == "leaky_relu":
+            expected = np.where(data < 0.0, 0.01 * data, data)
+        elif op_name == "silu":
+            expected = data / (1.0 + np.exp(-data))
+        elif op_name == "gelu":
+            expected = (
+                0.5
+                * data
+                * (1.0 + np.tanh(0.7978845608028654 * (data + 0.044715 * data**3)))
+            )
+        else:
+            expected = 1.0 / (1.0 + np.exp(-data))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, data.tolist())
+        device.global_memory.load_floats(n * 4, [0.0] * n)
+
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(n * 4, n), dtype=np.float32
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
+    def test_activations_use_mgpu_opt(self):
+        for op_name in ("relu", "leaky_relu", "silu", "gelu", "sigmoid"):
+            with self.subTest(op=op_name):
+                self._run_activation_via_mgpu_opt(op_name, 16)
+
 
 if __name__ == "__main__":
     unittest.main()

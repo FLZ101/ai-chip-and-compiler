@@ -309,68 +309,70 @@ class MLIRBuilder:
 
         if node.op == Op.RELU:
             body = [
-                f"{indent}  %c0 = arith.constant 0.000000e+00 : {scalar_type}",
-                f"{indent}  %value = arith.maximumf %in, %c0 : {scalar_type}",
+                f"{indent}  %act_c0 = arith.constant 0.000000e+00 : {scalar_type}",
+                f"{indent}  %act_value = arith.maximumf %in, %act_c0 : {scalar_type}",
             ]
         elif node.op == Op.LEAKY_RELU:
             alpha = float(node.attrs.get("alpha", 0.01))
             body = [
-                f"{indent}  %c0 = arith.constant 0.000000e+00 : {scalar_type}",
-                f"{indent}  %neg = arith.cmpf olt, %in, %c0 : {scalar_type}",
-                f"{indent}  %scaled = arith.mulf %in, " f"{alpha!r} : {scalar_type}",
-                f"{indent}  %value = arith.select %neg, %scaled, %in : {scalar_type}",
+                f"{indent}  %act_c0 = arith.constant 0.000000e+00 : {scalar_type}",
+                f"{indent}  %act_neg = arith.cmpf olt, %in, %act_c0 : {scalar_type}",
+                f"{indent}  %act_alpha = arith.constant {alpha!r} : {scalar_type}",
+                f"{indent}  %act_scaled = arith.mulf %in, %act_alpha : {scalar_type}",
+                f"{indent}  %act_value = arith.select %act_neg, %act_scaled, "
+                f"%in : {scalar_type}",
             ]
         elif node.op == Op.SIGMOID:
             body = [
-                f"{indent}  %neg = arith.negf %in : {scalar_type}",
-                f"{indent}  %exp = math.exp %neg : {scalar_type}",
-                f"{indent}  %one = arith.constant 1.000000e+00 : {scalar_type}",
-                f"{indent}  %den = arith.addf %one, %exp : {scalar_type}",
-                f"{indent}  %value = arith.divf %one, %den : {scalar_type}",
+                f"{indent}  %act_neg = arith.negf %in : {scalar_type}",
+                f"{indent}  %act_exp = math.exp %act_neg : {scalar_type}",
+                f"{indent}  %act_one = arith.constant 1.000000e+00 : {scalar_type}",
+                f"{indent}  %act_den = arith.addf %act_one, %act_exp : {scalar_type}",
+                f"{indent}  %act_value = arith.divf %act_one, %act_den : {scalar_type}",
             ]
         elif node.op == Op.SILU:
             body = [
-                f"{indent}  %neg = arith.negf %in : {scalar_type}",
-                f"{indent}  %exp = math.exp %neg : {scalar_type}",
-                f"{indent}  %one = arith.constant 1.000000e+00 : {scalar_type}",
-                f"{indent}  %den = arith.addf %one, %exp : {scalar_type}",
-                f"{indent}  %sigmoid = arith.divf %one, %den : {scalar_type}",
-                f"{indent}  %value = arith.mulf %in, %sigmoid : {scalar_type}",
+                f"{indent}  %act_neg = arith.negf %in : {scalar_type}",
+                f"{indent}  %act_exp = math.exp %act_neg : {scalar_type}",
+                f"{indent}  %act_one = arith.constant 1.000000e+00 : {scalar_type}",
+                f"{indent}  %act_den = arith.addf %act_one, %act_exp : {scalar_type}",
+                f"{indent}  %act_sigmoid = arith.divf %act_one, %act_den : {scalar_type}",
+                f"{indent}  %act_value = arith.mulf %in, %act_sigmoid : {scalar_type}",
             ]
         elif node.op == Op.GELU:
             body = [
-                f"{indent}  %cst = arith.constant 0.7978845608028654 : {scalar_type}",
-                f"{indent}  %x2 = arith.mulf %in, %in : {scalar_type}",
-                f"{indent}  %x3 = arith.mulf %x2, %in : {scalar_type}",
-                f"{indent}  %cst2 = arith.constant 0.044715 : {scalar_type}",
-                f"{indent}  %poly = arith.mulf %cst2, %x3 : {scalar_type}",
-                f"{indent}  %sum = arith.addf %in, %poly : {scalar_type}",
-                f"{indent}  %arg = arith.mulf %cst, %sum : {scalar_type}",
-                f"{indent}  %tanh = math.tanh %arg : {scalar_type}",
-                f"{indent}  %one = arith.constant 1.000000e+00 : {scalar_type}",
-                f"{indent}  %one_t = arith.addf %one, %tanh : {scalar_type}",
-                f"{indent}  %half = arith.constant 0.5 : {scalar_type}",
-                f"{indent}  %value = arith.mulf %in, %one_t : {scalar_type}",
-                f"{indent}  %value2 = arith.mulf %value, %half : {scalar_type}",
+                f"{indent}  %act_cst = arith.constant 0.7978845608028654 : {scalar_type}",
+                f"{indent}  %act_x2 = arith.mulf %in, %in : {scalar_type}",
+                f"{indent}  %act_x3 = arith.mulf %act_x2, %in : {scalar_type}",
+                f"{indent}  %act_cst2 = arith.constant 0.044715 : {scalar_type}",
+                f"{indent}  %act_poly = arith.mulf %act_cst2, %act_x3 : {scalar_type}",
+                f"{indent}  %act_sum = arith.addf %in, %act_poly : {scalar_type}",
+                f"{indent}  %act_arg = arith.mulf %act_cst, %act_sum : {scalar_type}",
+                f"{indent}  %act_tanh = math.tanh %act_arg : {scalar_type}",
+                f"{indent}  %act_one = arith.constant 1.000000e+00 : {scalar_type}",
+                f"{indent}  %act_one_t = arith.addf %act_one, %act_tanh : {scalar_type}",
+                f"{indent}  %act_half = arith.constant 0.5 : {scalar_type}",
+                f"{indent}  %act_value = arith.mulf %in, %act_one_t : {scalar_type}",
+                f"{indent}  %act_value2 = arith.mulf %act_value, %act_half : {scalar_type}",
             ]
         else:
             raise MLIRBuilderError(f"unsupported activation: {node.op.value}")
 
         yield_line = (
-            f"{indent}  linalg.yield %value2 : {scalar_type}"
+            f"{indent}  linalg.yield %act_value2 : {scalar_type}"
             if node.op == Op.GELU
-            else f"{indent}  linalg.yield %value : {scalar_type}"
+            else f"{indent}  linalg.yield %act_value : {scalar_type}"
         )
         return [
-            f"{indent}{result_name} = linalg.generic {{",
-            f"{indent}  indexing_maps = [{identity}, {identity}]",
+            f"{indent}linalg.generic {{",
+            f"{indent}  indexing_maps = [{identity}, {identity}],",
             f"{indent}  iterator_types = [{iterator_types}]",
             f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
             f"outs({result_name} : {out_type}) {{",
             f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
             *body,
             yield_line,
-            f"{indent}}} -> {out_type}",
+            f"{indent}}}",
         ]
 
     def _emit_shape_placeholder(
