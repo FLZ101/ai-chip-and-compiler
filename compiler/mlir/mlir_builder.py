@@ -1011,11 +1011,39 @@ class MLIRBuilder:
     def _emit_attention_placeholder(
         self, node: Node, result_name: str, indent: str
     ) -> list[str]:
-        value = node.inputs[0] if node.inputs else None
         output = node.outputs[0]
+        out_type = self._memref_type(output)
+        if node.op == Op.ROPE:
+            x, cos, sin = node.inputs
+            return [
+                f"{indent}mgpu.rope {self._value_names[x.name]}, "
+                f"{self._value_names[cos.name]}, {self._value_names[sin.name]}, "
+                f"{result_name} : {self._memref_type(x)}, "
+                f"{self._memref_type(cos)}, {self._memref_type(sin)}, {out_type}"
+            ]
+        if node.op == Op.CAUSAL_MASK:
+            return [f"{indent}mgpu.causal_mask {result_name} : {out_type}"]
+        if node.op == Op.KV_CACHE_APPEND:
+            cache, value = node.inputs
+            return [
+                f"{indent}mgpu.kv_cache_append "
+                f"{self._value_names[cache.name]}, {self._value_names[value.name]}, "
+                f"{result_name} : {self._memref_type(cache)}, "
+                f"{self._memref_type(value)}, {out_type}"
+            ]
+        if node.op == Op.KV_CACHE_GATHER:
+            cache, positions = node.inputs
+            return [
+                f"{indent}mgpu.kv_cache_gather "
+                f"{self._value_names[cache.name]}, "
+                f"{self._value_names[positions.name]}, {result_name} : "
+                f"{self._memref_type(cache)}, {self._memref_type(positions)}, "
+                f"{out_type}"
+            ]
+
+        value = node.inputs[0] if node.inputs else None
         scalar_type = self._scalar_type(output.dtype)
         value_type = self._memref_type(value) if value is not None else "memref<f32>"
-        out_type = self._memref_type(output)
         dims = ", ".join(f"d{axis}" for axis in range(output.rank))
         identity = f"affine_map<({dims}) -> ({dims})>"
         iterator_types = ", ".join('"parallel"' for _ in range(output.rank))

@@ -160,6 +160,8 @@ Exit criteria:
 
 ### Phase 4: Attention and sequence
 
+Status: **done**
+
 Implement/recognize decomposition for:
 
 - rope,

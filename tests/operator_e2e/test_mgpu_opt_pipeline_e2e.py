@@ -317,6 +317,159 @@ class TestMgpuOptPipelineEndToEnd(unittest.TestCase):
         expected = image.mean(axis=(2, 3), keepdims=True)
         np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
 
+    @staticmethod
+    def _rope_reference(x, cos, sin):
+        output = np.zeros_like(x)
+        for i in range(0, x.shape[-1], 2):
+            x0 = x[..., i]
+            x1 = x[..., i + 1]
+            c = cos[..., i]
+            s = sin[..., i]
+            output[..., i] = x0 * c - x1 * s
+            output[..., i + 1] = x0 * s + x1 * c
+        return output
+
+    def test_rope_uses_mgpu_opt(self):
+        x = np.arange(8, dtype=np.float32).reshape(2, 4)
+        cos = np.array([[0.9, 0.9, 0.8, 0.8], [0.7, 0.7, 0.6, 0.6]], dtype=np.float32)
+        sin = np.array([[0.1, 0.1, 0.2, 0.2], [0.3, 0.3, 0.4, 0.4]], dtype=np.float32)
+        frontend = ManualFrontend("rope")
+        xv = frontend.add_input("x", DType.F32, x.shape)
+        cv = frontend.add_input("cos", DType.F32, cos.shape)
+        sv = frontend.add_input("sin", DType.F32, sin.shape)
+        frontend.output(frontend.rope(xv, cv, sv))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.reshape(-1).tolist())
+        device.global_memory.load_floats(x.nbytes, cos.reshape(-1).tolist())
+        device.global_memory.load_floats(
+            x.nbytes + cos.nbytes, sin.reshape(-1).tolist()
+        )
+        output_base = x.nbytes + cos.nbytes + sin.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * x.size)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, x.size), dtype=np.float32
+        ).reshape(x.shape)
+        np.testing.assert_allclose(
+            actual, self._rope_reference(x, cos, sin), rtol=1e-4, atol=1e-5
+        )
+
+    def test_causal_mask_uses_mgpu_opt(self):
+        frontend = ManualFrontend("causal_mask")
+        frontend.output(frontend.causal_mask(query_len=3, key_len=3, batch=1))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, [0.0] * 9)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(0, 9), dtype=np.float32
+        ).reshape(1, 1, 3, 3)
+        expected = np.tril(np.ones((3, 3), dtype=np.float32)).reshape(1, 1, 3, 3)
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_kv_cache_append_uses_mgpu_opt(self):
+        cache = np.zeros((1, 1, 2, 2), dtype=np.float32)
+        value = np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)
+        frontend = ManualFrontend("kv_append")
+        c = frontend.add_input("cache", DType.F32, cache.shape)
+        v = frontend.add_input("value", DType.F32, value.shape)
+        frontend.output(frontend.kv_cache_append(c, v))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, cache.reshape(-1).tolist())
+        device.global_memory.load_floats(cache.nbytes, value.reshape(-1).tolist())
+        output_base = cache.nbytes + value.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * value.size)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, value.size), dtype=np.float32
+        ).reshape(value.shape)
+        np.testing.assert_array_equal(actual, value)
+
+    def test_kv_cache_gather_uses_mgpu_opt(self):
+        cache = np.arange(8, dtype=np.float32).reshape(1, 1, 4, 2)
+        positions = np.array([[2]], dtype=np.float32)
+        frontend = ManualFrontend("kv_gather")
+        c = frontend.add_input("cache", DType.F32, cache.shape)
+        p = frontend.add_input("positions", DType.F32, positions.shape)
+        frontend.output(frontend.kv_cache_gather(c, p))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, cache.reshape(-1).tolist())
+        device.global_memory.load_floats(cache.nbytes, positions.reshape(-1).tolist())
+        output_base = cache.nbytes + positions.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * 2)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, 2), dtype=np.float32
+        ).reshape(1, 1, 1, 2)
+        np.testing.assert_array_equal(actual, cache[:, :, 2:3, :])
+
+    @staticmethod
+    def _softmax_reference(x):
+        shifted = x - np.max(x, axis=-1, keepdims=True)
+        exp = np.exp(shifted)
+        return exp / np.sum(exp, axis=-1, keepdims=True)
+
+    @staticmethod
+    def _attention_reference(q, k, v, scale, mask=None):
+        scores = np.matmul(q, np.swapaxes(k, -1, -2)) * scale
+        if mask is not None:
+            scores = np.where(mask == 0, -np.inf, scores)
+        weights = TestMgpuOptPipelineEndToEnd._softmax_reference(scores)
+        return np.matmul(weights, v)
+
+    def test_attention_uses_mgpu_opt(self):
+        q = np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)
+        k = np.array([[[[1.0, 0.0], [0.0, 1.0]]]], dtype=np.float32)
+        v = np.array([[[[2.0, 1.0], [0.0, 3.0]]]], dtype=np.float32)
+        mask = np.array([[[[1.0, 0.0], [1.0, 1.0]]]], dtype=np.float32)
+        scale = 1.0 / np.sqrt(2.0)
+        mlir = f"""
+module {{
+  func.func @attention(%q: memref<2x2xf32>, %k: memref<2x2xf32>, %v: memref<2x2xf32>, %mask: memref<2x2xf32>, %out: memref<2x2xf32>) {{
+    %c1 = arith.constant 1 : index
+    mgpu.launch blocks(%c1, %c1, %c1) threads(%c1, %c1, %c1) {{
+      mgpu.attention %q, %k, %v, %mask, %out {{scale = {scale} : f32, masked}} : memref<2x2xf32>, memref<2x2xf32>, memref<2x2xf32>, memref<2x2xf32>, memref<2x2xf32>
+      mgpu.return
+    }}
+    return
+  }}
+}}
+"""
+        result = run_mgpu_pipeline(mlir)
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, q.reshape(-1).tolist())
+        device.global_memory.load_floats(16, k.reshape(-1).tolist())
+        device.global_memory.load_floats(32, v.reshape(-1).tolist())
+        device.global_memory.load_floats(48, mask.reshape(-1).tolist())
+        device.global_memory.load_floats(64, [0.0] * 4)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(64, 4), dtype=np.float32
+        ).reshape(1, 1, 2, 2)
+        np.testing.assert_allclose(
+            actual,
+            self._attention_reference(q, k, v, scale, mask),
+            rtol=1e-4,
+            atol=1e-5,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

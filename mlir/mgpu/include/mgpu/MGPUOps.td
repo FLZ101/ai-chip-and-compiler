@@ -133,6 +133,53 @@ def MGPU_AttentionOp : MGPU_Op<"attention", [MemoryEffects<[MemRead, MemWrite]>]
   }];
 }
 
+def MGPU_RopeOp : MGPU_Op<"rope", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Apply rotary position embedding";
+  let arguments = (ins AnyMemRef:$x,
+                       AnyMemRef:$cos,
+                       AnyMemRef:$sin,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = [{
+    $x `,` $cos `,` $sin `,` $output
+    attr-dict
+    `:` type($x) `,` type($cos) `,` type($sin) `,` type($output)
+  }];
+}
+
+def MGPU_CausalMaskOp : MGPU_Op<"causal_mask", [MemoryEffects<[MemWrite]>]> {
+  let summary = "Write a lower-triangular causal mask";
+  let arguments = (ins AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = "$output attr-dict `:` type($output)";
+}
+
+def MGPU_KVCacheAppendOp : MGPU_Op<"kv_cache_append", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Append a value to a KV cache";
+  let arguments = (ins AnyMemRef:$cache,
+                       AnyMemRef:$value,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = [{
+    $cache `,` $value `,` $output
+    attr-dict
+    `:` type($cache) `,` type($value) `,` type($output)
+  }];
+}
+
+def MGPU_KVCacheGatherOp : MGPU_Op<"kv_cache_gather", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Gather a position from a KV cache";
+  let arguments = (ins AnyMemRef:$cache,
+                       AnyMemRef:$positions,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = [{
+    $cache `,` $positions `,` $output
+    attr-dict
+    `:` type($cache) `,` type($positions) `,` type($output)
+  }];
+}
+
 def MGPU_QuantOp : MGPU_Op<"quant", [Pure]> {
   let summary = "Quantize a value using scale and zero point";
   let arguments = (ins AnyType:$input,
