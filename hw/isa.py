@@ -42,8 +42,9 @@ REGISTER_DEST_OPS = {
     "IDIV",
     # Fused multiply-add: dst = a * b + c.
     "FMA",
-    # Tensor-core-style matrix multiply-accumulate.  The MVP models one
-    # fragment element as dst = a * b + c.
+    # Tensor-core matrix multiply-accumulate.  ``MMA Rd, Ra, Rb, Rc`` names
+    # four eight-register fragment blocks and is executed warp-wide by the
+    # simulator.
     "MMA",
     # Unary ALU operations.
     "NEG",

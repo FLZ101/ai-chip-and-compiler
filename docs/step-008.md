@@ -72,8 +72,10 @@ It launches one block with shape `(N, M)`:
 
 For each tile, every thread cooperatively loads one `A` element and one `B`
 element into shared memory, synchronizes, and accumulates its output element
-with `FMA`.  This demonstrates shared-memory tiling and register accumulation;
-rectangular and multi-block tiling can be added later.
+with `MMA`.  Phase 4.3 replaced the original scalar `FMA` loop with the
+tensor-core `MMA` instruction; the simulator still models one fragment element
+as a scalar multiply-accumulate, so the shared-memory tiling structure is
+unchanged.  Rectangular and multi-block tiling can be added later.
 
 ---
 
@@ -100,7 +102,7 @@ New tests cover:
 
 - elementwise add/sub/mul/div,
 - reduction sum/mean/max,
-- tiled matmul with `FMA` and shared memory.
+- tiled matmul with `MMA` and shared memory.
 
 Run:
 

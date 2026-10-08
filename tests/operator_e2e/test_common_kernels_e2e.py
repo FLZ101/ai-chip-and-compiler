@@ -109,21 +109,21 @@ class TestCommonKernelsEndToEnd(unittest.TestCase):
 
     def test_tiled_matmul(self):
         rng = np.random.default_rng(3)
-        a = rng.normal(size=(4, 8)).astype(np.float32)
-        b = rng.normal(size=(8, 4)).astype(np.float32)
+        a = rng.normal(size=(16, 16)).astype(np.float32)
+        b = rng.normal(size=(16, 16)).astype(np.float32)
         expected = a @ b
 
         result = run_operator_e2e(
             make_device(),
-            _matmul_graph(4, 8, 4),
+            _matmul_graph(16, 16, 16),
             {"a": a, "b": b},
             [expected],
             lowering=lower_common_kernel,
         )
 
-        self.assertIn("FMA", result.isa_text)
-        self.assertIn("LDS", result.isa_text)
-        self.assertIn("STS", result.isa_text)
+        self.assertIn("MMA", result.isa_text)
+        self.assertIn("LDG", result.isa_text)
+        self.assertIn("STG", result.isa_text)
         np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-5, atol=1e-5)
 
 

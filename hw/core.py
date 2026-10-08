@@ -16,7 +16,7 @@ from .isa import (
     Reg,
 )
 from .memory import ByteMemory, RegisterFile, as_int
-from .mma import shared_bank_index
+from .mma import DEFAULT_MMA_FRAGMENT_LAYOUT, FragmentRole, shared_bank_index
 from .timing import (
     DEFAULT_TIMING_MODEL,
     ProfileCounters,
@@ -43,6 +43,11 @@ SPECIAL_REGISTER_NAMES = {
     "warpid",
     "clock",
 }
+
+# A 16x16x16 MMA fragment is distributed over a 32-lane warp as 8 registers
+# per lane.  ``MMA`` therefore addresses four register blocks of eight
+# registers: A, B, C (input accumulator), and D (destination).
+MMA_FRAGMENT_REGISTER_COUNT = 8
 
 
 @dataclass
@@ -250,7 +255,14 @@ class Device:
         warp.busy_until = self.clock + latency
         warp.last_issued_class = opcode_type
 
-        if instruction.op in REGISTER_DEST_OPS:
+        if instruction.op == "MMA":
+            dst = instruction.dst
+            if not isinstance(dst, Reg):
+                raise ValueError("MMA requires a register block destination")
+            for lane in warp.active_lanes:
+                for register in _mma_register_names(dst.name):
+                    lane.reg_ready_cycle[register] = self.clock + latency
+        elif instruction.op in REGISTER_DEST_OPS:
             dst = instruction.dst
             if not isinstance(dst, Reg):
                 raise ValueError(f"{instruction.op} requires a register destination")
@@ -428,6 +440,32 @@ def _dimension_index(name: str) -> int:
     return {"x": 0, "y": 1, "z": 2}[name[-1]]
 
 
+def _mma_register_names(base: str) -> list[str]:
+    """Return the eight consecutive register names starting at *base*."""
+    if not base.startswith("R") or not base[1:].isdigit():
+        raise ValueError(f"MMA expects a register block base, got {base!r}")
+    start = int(base[1:])
+    return [f"R{start + index}" for index in range(MMA_FRAGMENT_REGISTER_COUNT)]
+
+
+def _mma_source_register_names(instruction: Instruction) -> set[str]:
+    """Return all normal registers read by a fragment-wide ``MMA``.
+
+    The instruction syntax is ``MMA Rd, Ra, Rb, Rc``.  Each operand is the
+    base of an eight-register fragment block.  The scoreboard must therefore
+    wait for every A, B, and C fragment register, not just the one named by
+    the operand.
+    """
+    sources: set[str] = set()
+    if instruction.op != "MMA" or len(instruction.srcs) != 3:
+        return sources
+    for operand in instruction.srcs:
+        if not isinstance(operand, Reg):
+            continue
+        sources.update(_mma_register_names(operand.name))
+    return sources
+
+
 def _instruction_source_register_names(instruction: Instruction) -> set[str]:
     """Return normal register names read by ``instruction``.
 
@@ -443,6 +481,8 @@ def _instruction_source_register_names(instruction: Instruction) -> set[str]:
         elif isinstance(operand, Mem) and operand.base not in SPECIAL_REGISTER_NAMES:
             sources.add(operand.base)
 
+    if instruction.op == "MMA":
+        return _mma_source_register_names(instruction)
     if instruction.op in REGISTER_DEST_OPS or instruction.op in MEMORY_DEST_OPS:
         for operand in instruction.srcs:
             add_operand(operand)
@@ -544,10 +584,6 @@ def _alu(
     if op == "FMA":
         if b is None or c is None:
             raise ValueError("FMA requires two source operands")
-        return a * b + c
-    if op == "MMA":
-        if b is None or c is None:
-            raise ValueError("MMA requires two source operands")
         return a * b + c
     if b is None:
         raise ValueError(f"{op} requires a source operand")
@@ -708,6 +744,79 @@ def _execute_select(
     )
 
 
+def _execute_mma(
+    device: Device,
+    sm: SM,
+    warp: WarpState,
+    instruction: Instruction,
+) -> None:
+    """Execute one warp-wide 16x16x16 tensor-core MMA.
+
+    The instruction is ``MMA Rd, Ra, Rb, Rc``.  ``Ra``, ``Rb``, and ``Rc``
+    name the base of three eight-register fragment blocks.  The 32 lanes
+    collectively supply a complete 16x16 A matrix, 16x16 B matrix, and 16x16 C
+    accumulator according to :class:`hw.mma.FragmentLayout`.  The function
+    computes ``D = A @ B + C`` and writes D back to the eight-register block
+    starting at ``Rd``.
+    """
+    del device, sm  # The matrix operands live entirely in the warp register file.
+
+    if len(warp.lanes) != DEFAULT_MMA_FRAGMENT_LAYOUT.lane_count:
+        raise NotImplementedError(
+            "warp-wide MMA requires a full 32-lane warp; "
+            "launch a block with 32 threads"
+        )
+    if warp.active_mask != (1 << len(warp.lanes)) - 1:
+        raise NotImplementedError("warp-wide MMA does not support divergent lanes")
+    if len(instruction.srcs) != 3:
+        raise ValueError("MMA requires three source register blocks")
+    if not isinstance(instruction.dst, Reg):
+        raise ValueError("MMA requires a destination register block")
+
+    dst_base = instruction.dst.name
+    src_bases = []
+    for operand in instruction.srcs:
+        if not isinstance(operand, Reg):
+            raise ValueError("MMA source must be a register block base")
+        src_bases.append(operand.name)
+
+    a_base, b_base, c_base = src_bases
+    a_regs = _mma_register_names(a_base)
+    b_regs = _mma_register_names(b_base)
+    c_regs = _mma_register_names(c_base)
+    d_regs = _mma_register_names(dst_base)
+
+    layout = DEFAULT_MMA_FRAGMENT_LAYOUT
+    a = [[0.0 for _ in range(16)] for _ in range(16)]
+    b = [[0.0 for _ in range(16)] for _ in range(16)]
+    c = [[0.0 for _ in range(16)] for _ in range(16)]
+
+    for lane in warp.lanes:
+        lane_id = lane.lane_id
+        for slot in range(MMA_FRAGMENT_REGISTER_COUNT):
+            row, col = layout.offsets_for_lane(FragmentRole.A, lane_id)[slot]
+            a[row][col] = lane.regs.read(a_regs[slot])
+            row, col = layout.offsets_for_lane(FragmentRole.B, lane_id)[slot]
+            b[row][col] = lane.regs.read(b_regs[slot])
+            row, col = layout.offsets_for_lane(FragmentRole.C, lane_id)[slot]
+            c[row][col] = lane.regs.read(c_regs[slot])
+
+    d = [[0.0 for _ in range(16)] for _ in range(16)]
+    for row in range(16):
+        for col in range(16):
+            value = c[row][col]
+            for k in range(16):
+                value += a[row][k] * b[k][col]
+            d[row][col] = value
+
+    for lane in warp.lanes:
+        lane_id = lane.lane_id
+        for slot, (row, col) in enumerate(
+            layout.offsets_for_lane(FragmentRole.C, lane_id)
+        ):
+            lane.regs.write(d_regs[slot], d[row][col])
+
+
 def _execute_barrier(sm: SM, warp: WarpState) -> None:
     """Implement a block-scoped ``BAR.SYNC``.
 
@@ -794,6 +903,10 @@ def execute_warp(
     if op == "BRA":
         _execute_branch(device, sm, warp, instruction, program)
         return
+    if op == "MMA":
+        _execute_mma(device, sm, warp, instruction)
+        warp.pc += 1
+        return
 
     for lane in warp.active_lanes:
         if op.startswith("LDG") or op.startswith("LDS"):
@@ -828,7 +941,6 @@ def execute_warp(
             "MAX",
             "MIN",
             "FMA",
-            "MMA",
             "MOV",
             "NEG",
             "ABS",
@@ -844,15 +956,6 @@ def execute_warp(
                 if len(instruction.srcs) != 3:
                     raise ValueError(
                         "FMA expects three source operands after destination"
-                    )
-                a = _read_operand(device, sm, warp, lane, instruction.srcs[0])
-                b = _read_operand(device, sm, warp, lane, instruction.srcs[1])
-                c = _read_operand(device, sm, warp, lane, instruction.srcs[2])
-                value = _alu(op, a, b, c)
-            elif op == "MMA":
-                if len(instruction.srcs) != 3:
-                    raise ValueError(
-                        "MMA expects three source operands after destination"
                     )
                 a = _read_operand(device, sm, warp, lane, instruction.srcs[0])
                 b = _read_operand(device, sm, warp, lane, instruction.srcs[1])

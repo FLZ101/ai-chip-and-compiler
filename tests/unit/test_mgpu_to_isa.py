@@ -44,9 +44,9 @@ class TestMGpuToIsa(unittest.TestCase):
 
     def test_matmul_runs_in_simulator(self):
         rng = np.random.default_rng(7)
-        a = rng.normal(size=(4, 8)).astype(np.float32)
-        b = rng.normal(size=(8, 4)).astype(np.float32)
-        graph = _matmul_graph(4, 8, 4)
+        a = rng.normal(size=(16, 16)).astype(np.float32)
+        b = rng.normal(size=(16, 16)).astype(np.float32)
+        graph = _matmul_graph(16, 16, 16)
         result = run_operator_e2e(
             make_device(),
             graph,
@@ -55,8 +55,8 @@ class TestMGpuToIsa(unittest.TestCase):
             lowering=lower_mgpu_to_isa,
         )
         self.assertIn("mgpu.launch", result.mlir_text)
-        self.assertIn("FMA", result.isa_text)
-        self.assertIn("LDS", result.isa_text)
+        self.assertIn("MMA", result.isa_text)
+        self.assertIn("LDG", result.isa_text)
         np.testing.assert_allclose(result.outputs[0], a @ b, rtol=1e-5, atol=1e-5)
 
 

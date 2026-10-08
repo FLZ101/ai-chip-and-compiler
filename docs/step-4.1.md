@@ -31,9 +31,9 @@ NumPy's `A @ B`.
 
 ## 2. Scope
 
-This phase intentionally implements functional MMA only. Fragment layout,
-shared-memory swizzling, and true warp-wide tensor-core execution are deferred
-to Phase 4.2.
+This phase intentionally implements functional MMA only.  The later Phase 4.2
+and 4.3 work adds fragment layout, shared-memory swizzling, and the full
+warp-wide tensor-core execution model.
 
 ---
 

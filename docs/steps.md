@@ -255,7 +255,7 @@ Lowering work:
 
 - thread/block mapping,
 - shared-memory tiling for matmul,
-- register tiling and `FMA`.
+- register tiling and `MMA`.
 
 Tests:
 

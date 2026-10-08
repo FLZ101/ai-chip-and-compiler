@@ -226,6 +226,32 @@ struct MGpuToIsaPass
     return found;
   }
 
+  static void emitFragmentLoad(llvm::raw_ostream &os, int dest, int rowGroup,
+                               int colGroup, int64_t base, int64_t stride) {
+    os << "MOV R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MUL R26, R26, " << stride << "\n"
+       << "MOV R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "ADD R26, R26, R27\n"
+       << "MUL R26, R26, 4\n"
+       << "ADD R26, R26, " << base << "\n"
+       << "LDG R" << dest << ", [R26]\n";
+  }
+
+  static void emitFragmentStore(llvm::raw_ostream &os, int source, int rowGroup,
+                                int colGroup, int64_t base, int64_t stride) {
+    os << "MOV R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MUL R26, R26, " << stride << "\n"
+       << "MOV R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "ADD R26, R26, R27\n"
+       << "MUL R26, R26, 4\n"
+       << "ADD R26, R26, " << base << "\n"
+       << "STG [R26], R" << source << "\n";
+  }
+
   std::optional<IsaText> emitMatmulIsa(mgpu::LaunchOp launch) {
     SmallVector<linalg::MatmulOp> matmuls;
     launch.getBody().front().walk(
@@ -250,93 +276,42 @@ struct MGpuToIsaPass
     int64_t k = aType.getShape()[1];
     int64_t kB = bType.getShape()[0];
     int64_t n = bType.getShape()[1];
-    if (k != kB || m != n || (k % n) != 0)
+    if (m != 16 || k != 16 || kB != 16 || n != 16)
       return std::nullopt;
 
-    int64_t tile = n;
-    int64_t smemBOffset = m * tile * 4;
     int64_t aBase = 0;
     int64_t bBase = m * k * 4;
     int64_t cBase = bBase + k * n * 4;
 
-    VirtualRegisterAllocator regs;
-    int tidX = regs.acquire();
-    int tidY = regs.acquire();
-    int acc = regs.acquire();
-    int addr = regs.acquire();
-    int offset = regs.acquire();
-    int base = regs.acquire();
-    int value = regs.acquire();
-    int shared = regs.acquire();
-    int smem = regs.acquire();
-    auto R = [&](int reg) { return regs.name(reg); };
-
     std::string code;
     llvm::raw_string_ostream os(code);
-    os << "MOV " << R(tidX) << ", tid.x\n"
-       << "MOV " << R(tidY) << ", tid.y\n"
-       << "MOV " << R(acc) << ", 0\n";
+    os << "IDIV R24, tid.x, 4\n"
+       << "MUL R25, R24, 4\n"
+       << "SUB R25, tid.x, R25\n";
+    for (int reg = 16; reg < 24; ++reg)
+      os << "MOV R" << reg << ", 0\n";
 
-    for (int64_t kStart = 0; kStart < k; kStart += tile) {
-      os << "MUL " << R(addr) << ", " << R(tidY) << ", " << k << "\n"
-         << "MOV " << R(offset) << ", " << kStart << "\n"
-         << "ADD " << R(offset) << ", " << R(offset) << ", " << R(tidX) << "\n"
-         << "ADD " << R(addr) << ", " << R(addr) << ", " << R(offset) << "\n"
-         << "MUL " << R(addr) << ", " << R(addr) << ", 4\n"
-         << "MOV " << R(base) << ", " << aBase << "\n"
-         << "ADD " << R(addr) << ", " << R(addr) << ", " << R(base) << "\n"
-         << "LDG " << R(value) << ", [" << R(addr) << "]\n"
-         << "MUL " << R(shared) << ", " << R(tidY) << ", " << tile << "\n"
-         << "ADD " << R(shared) << ", " << R(shared) << ", " << R(tidX) << "\n"
-         << "MUL " << R(shared) << ", " << R(shared) << ", 4\n"
-         << "STS [" << R(shared) << "], " << R(value) << "\n";
-
-      os << "MUL " << R(addr) << ", " << R(tidY) << ", " << n << "\n"
-         << "ADD " << R(addr) << ", " << R(addr) << ", " << R(tidX) << "\n"
-         << "MUL " << R(addr) << ", " << R(addr) << ", 4\n"
-         << "MOV " << R(offset) << ", " << smemBOffset << "\n"
-         << "ADD " << R(addr) << ", " << R(addr) << ", " << R(offset) << "\n"
-         << "MOV " << R(offset) << ", " << kStart << "\n"
-         << "ADD " << R(offset) << ", " << R(offset) << ", " << R(tidY) << "\n"
-         << "MUL " << R(offset) << ", " << R(offset) << ", " << n << "\n"
-         << "ADD " << R(offset) << ", " << R(offset) << ", " << R(tidX) << "\n"
-         << "MUL " << R(offset) << ", " << R(offset) << ", 4\n"
-         << "MOV " << R(base) << ", " << bBase << "\n"
-         << "ADD " << R(offset) << ", " << R(offset) << ", " << R(base) << "\n"
-         << "LDG " << R(value) << ", [" << R(offset) << "]\n"
-         << "STS [" << R(addr) << "], " << R(value) << "\n"
-         << "BAR.SYNC\n";
-
-      os << "MOV " << R(smem) << ", " << smemBOffset << "\n";
-      for (int64_t inner = 0; inner < tile; ++inner) {
-        os << "MUL " << R(addr) << ", " << R(tidY) << ", " << tile << "\n"
-           << "ADD " << R(addr) << ", " << R(addr) << ", " << inner << "\n"
-           << "MUL " << R(addr) << ", " << R(addr) << ", 4\n"
-           << "LDS " << R(value) << ", [" << R(addr) << "]\n"
-           << "MOV " << R(offset) << ", " << (inner * n) << "\n"
-           << "ADD " << R(offset) << ", " << R(offset) << ", " << R(tidX) << "\n"
-           << "MUL " << R(offset) << ", " << R(offset) << ", 4\n"
-           << "ADD " << R(offset) << ", " << R(offset) << ", " << R(smem) << "\n"
-           << "LDS " << R(shared) << ", [" << R(offset) << "]\n"
-           << "FMA " << R(acc) << ", " << R(value) << ", " << R(shared) << ", "
-           << R(acc) << "\n";
-      }
-      os << "BAR.SYNC\n";
+    for (int slot = 0; slot < 8; ++slot) {
+      int rowGroup = slot / 4;
+      int colGroup = slot % 4;
+      emitFragmentLoad(os, slot, rowGroup, colGroup, aBase, 16);
+      emitFragmentLoad(os, 8 + slot, rowGroup, colGroup, bBase, 16);
     }
 
-    os << "MUL " << R(addr) << ", " << R(tidY) << ", " << n << "\n"
-       << "ADD " << R(addr) << ", " << R(addr) << ", " << R(tidX) << "\n"
-       << "MUL " << R(addr) << ", " << R(addr) << ", 4\n"
-       << "MOV " << R(offset) << ", " << cBase << "\n"
-       << "ADD " << R(addr) << ", " << R(addr) << ", " << R(offset) << "\n"
-       << "STG [" << R(addr) << "], " << R(acc) << "\n"
-       << "EXIT\n";
+    os << "MMA R16, R0, R8, R16\n";
+
+    for (int slot = 0; slot < 8; ++slot) {
+      int rowGroup = slot / 4;
+      int colGroup = slot % 4;
+      emitFragmentStore(os, 16 + slot, rowGroup, colGroup, cBase, 16);
+    }
+    os << "EXIT\n";
     os.flush();
 
     IsaText result;
     result.code = code;
     result.grid = "1x1x1";
-    result.block = std::to_string(n) + "x" + std::to_string(m) + "x1";
+    result.block = "32x1x1";
     return result;
   }
 

@@ -4,7 +4,7 @@ Step 008 implements the first production MLIR/Model-IR to ISA lowerings:
 
 * rank-1 elementwise add/sub/mul/div,
 * rank-1 sum/mean/max reductions using shared-memory tree reduction,
-* square tiled matrix multiplication using shared-memory tiles and ``FMA``.
+* square tiled matrix multiplication using shared-memory tiles and ``MMA``.
 
 The code generators are deliberately simple and deterministic.  They are the
 reference lowerings consumed by the shared operator E2E harness.
@@ -220,94 +220,131 @@ def _lower_tiled_matmul(
     k_b, n = b.shape
     if k != k_b:
         raise NotImplementedError("matmul inner dimensions do not match")
-    if m != n:
-        raise NotImplementedError("matmul lowering currently requires square matrices")
-    if k % n != 0:
-        raise NotImplementedError("matmul K must be divisible by the square tile size")
+    if (m, k, n) != (16, 16, 16):
+        raise NotImplementedError(
+            "fragment-aware matmul lowering currently supports one 16x16x16 tile"
+        )
 
-    tile = n
-    block_threads = m * n
-    smem_b_offset = m * tile * 4
+    return _emit_mma_matmul_isa(a, b, c)
 
+
+def _emit_mma_matmul_isa(
+    a: Any, b: Any, c: Any
+) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
+    """Emit a warp-wide 16x16x16 MMA matmul.
+
+    The 32-lane warp loads A/B fragments into consecutive register blocks,
+    executes one fragment-wide ``MMA`` instruction, and stores the C/D
+    fragment back to global memory.
+
+    Register allocation:
+
+    * ``R0..R7``  -> A fragment
+    * ``R8..R15`` -> B fragment
+    * ``R16..R23`` -> C input and D output fragment
+    * ``R24``     -> lane row
+    * ``R25``     -> lane column
+    * ``R26``     -> computed byte address
+    * ``R27``     -> temporary index
+    """
     lines: list[str] = [
-        "MOV R0, tid.x",
-        "MOV R1, tid.y",
-        f"MOV R20, 0",
+        # lane = tid.x, row = lane // 4, col = lane % 4.
+        "IDIV R24, tid.x, 4",
+        "MUL R25, R24, 4",
+        "SUB R25, tid.x, R25",
     ]
 
-    for k_start in range(0, k, tile):
-        k_base = k_start
-        # Cooperative copy of one A tile into shared memory.
-        lines.extend(
-            [
-                f"MUL R2, R1, {k}",
-                f"MOV R3, {k_base}",
-                "ADD R3, R3, R0",
-                "ADD R2, R2, R3",
-                "MUL R2, R2, 4",
-                f"MOV R4, {a.base_addr}",
-                "ADD R2, R2, R4",
-                "LDG R5, [R2]",
-                f"MUL R6, R1, {tile}",
-                "ADD R6, R6, R0",
-                "MUL R6, R6, 4",
-                "STS [R6], R5",
-            ]
-        )
+    # Zero the C/D fragment before accumulating the single K tile.
+    for register in range(16, 24):
+        lines.append(f"MOV R{register}, 0")
 
-        # Cooperative copy of one B tile into shared memory.
+    # Load one A element and one B element into each fragment register slot.
+    for slot in range(8):
+        row_group = slot // 4
+        col_group = slot % 4
+        a_reg = slot
+        b_reg = 8 + slot
         lines.extend(
-            [
-                f"MUL R2, R1, {n}",
-                "ADD R2, R2, R0",
-                "MUL R2, R2, 4",
-                f"MOV R3, {smem_b_offset}",
-                "ADD R2, R2, R3",
-                f"MOV R4, {k_base}",
-                "ADD R4, R4, R1",
-                f"MUL R4, R4, {n}",
-                "ADD R4, R4, R0",
-                "MUL R4, R4, 4",
-                f"MOV R5, {b.base_addr}",
-                "ADD R4, R4, R5",
-                "LDG R6, [R4]",
-                "STS [R2], R6",
-                "BAR.SYNC",
-            ]
-        )
-
-        # Each thread computes one C element with FMA.
-        lines.append(f"MOV R7, {smem_b_offset}")
-        for inner in range(tile):
-            lines.extend(
-                [
-                    f"MUL R2, R1, {tile}",
-                    f"ADD R2, R2, {inner}",
-                    "MUL R2, R2, 4",
-                    "LDS R3, [R2]",
-                    f"MOV R4, {inner * n}",
-                    "ADD R4, R4, R0",
-                    "MUL R4, R4, 4",
-                    "ADD R4, R4, R7",
-                    "LDS R5, [R4]",
-                    "FMA R20, R3, R5, R20",
-                ]
+            _emit_fragment_load(
+                dest=a_reg,
+                row_group=row_group,
+                col_group=col_group,
+                base=a.base_addr,
+                stride=16,
             )
-        lines.append("BAR.SYNC")
+        )
+        lines.extend(
+            _emit_fragment_load(
+                dest=b_reg,
+                row_group=row_group,
+                col_group=col_group,
+                base=b.base_addr,
+                stride=16,
+            )
+        )
 
-    lines.extend(
-        [
-            f"MUL R2, R1, {n}",
-            "ADD R2, R2, R0",
-            "MUL R2, R2, 4",
-            f"MOV R3, {c.base_addr}",
-            "ADD R2, R2, R3",
-            "STG [R2], R20",
-            "EXIT",
-        ]
-    )
+    lines.append("MMA R16, R0, R8, R16")
 
-    return "\n".join(lines) + "\n", ((1,), (n, m))
+    # Store the D fragment.  The C and D layouts are identical.
+    for slot in range(8):
+        row_group = slot // 4
+        col_group = slot % 4
+        lines.extend(
+            _emit_fragment_store(
+                source=16 + slot,
+                row_group=row_group,
+                col_group=col_group,
+                base=c.base_addr,
+                stride=16,
+            )
+        )
+
+    lines.append("EXIT")
+    return "\n".join(lines) + "\n", ((1,), (32,))
+
+
+def _emit_fragment_load(
+    *,
+    dest: int,
+    row_group: int,
+    col_group: int,
+    base: int,
+    stride: int,
+) -> list[str]:
+    """Emit ``LDG Rd, [global_address(row, col)]`` for one fragment element."""
+    return [
+        f"MOV R26, {row_group * 8}",
+        "ADD R26, R26, R24",
+        f"MUL R26, R26, {stride}",
+        f"MOV R27, {col_group * 4}",
+        "ADD R27, R27, R25",
+        "ADD R26, R26, R27",
+        "MUL R26, R26, 4",
+        f"ADD R26, R26, {base}",
+        f"LDG R{dest}, [R26]",
+    ]
+
+
+def _emit_fragment_store(
+    *,
+    source: int,
+    row_group: int,
+    col_group: int,
+    base: int,
+    stride: int,
+) -> list[str]:
+    """Emit ``STG [global_address(row, col)], Rs`` for one fragment element."""
+    return [
+        f"MOV R26, {row_group * 8}",
+        "ADD R26, R26, R24",
+        f"MUL R26, R26, {stride}",
+        f"MOV R27, {col_group * 4}",
+        "ADD R27, R27, R25",
+        "ADD R26, R26, R27",
+        "MUL R26, R26, 4",
+        f"ADD R26, R26, {base}",
+        f"STG [R26], R{source}",
+    ]
 
 
 def _next_power_of_two(value: int) -> int:

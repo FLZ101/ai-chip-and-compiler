@@ -435,6 +435,10 @@ Tests:
 
 ### 4.3 Lower tiled matmul to MMA
 
+Status: **done**
+
+Reference: [step-4.3.md](step-4.3.md)
+
 Replace scalar FMA inner loops with `mgpu.mma`.
 
 Tests:

@@ -31,8 +31,8 @@ def _matmul():
 
 def _matmul_square():
     frontend = ManualFrontend("matmul_square")
-    a = frontend.add_input("a", DType.F32, (4, 8))
-    b = frontend.add_input("b", DType.F32, (8, 4))
+    a = frontend.add_input("a", DType.F32, (16, 16))
+    b = frontend.add_input("b", DType.F32, (16, 16))
     frontend.output(frontend.matmul(a, b))
     return frontend.build()
 
