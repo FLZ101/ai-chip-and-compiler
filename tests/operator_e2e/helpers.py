@@ -19,6 +19,7 @@ from typing import Callable
 
 import numpy as np
 
+from compiler.codegen.dispatcher import lower_kernel_python
 from compiler.mlir import MLIRBuilder
 from compiler.model_ir import Graph, Op
 from hw.device import Device, create_device, launch
@@ -63,7 +64,7 @@ def allocate_global_buffers(
     device: Device,
     tensors: dict[str, np.ndarray],
     *,
-    alignment: int = 4096,
+    alignment: int = 4,
 ) -> MemoryLayout:
     """Write host tensors into global memory and return their placements."""
     layout: MemoryLayout = {}
@@ -173,7 +174,10 @@ def run_operator_e2e(
                 nodes=[node],
             )
             subgraph.validate()
-            node_isa, (grid_dim, block_dim) = lowering(subgraph, mlir_text, layout)
+            sub_mlir_text = MLIRBuilder().build(subgraph)
+            node_isa, (grid_dim, block_dim) = lower_kernel_python(
+                subgraph, sub_mlir_text, layout
+            )
             isa_parts.append(node_isa)
             program = parse_asm(node_isa)
             profile_snapshot = launch(

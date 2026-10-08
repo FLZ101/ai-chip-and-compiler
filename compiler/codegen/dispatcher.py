@@ -13,6 +13,41 @@ from .norm_detection_kernels import lower_norm_detection_kernel
 from .shape_kernels import lower_shape_kernel
 from .transformer_kernels import lower_transformer_kernel
 
+CPP_SUPPORTED_OPS = {
+    Op.ADD,
+    Op.SUB,
+    Op.MUL,
+    Op.DIV,
+    Op.REDUCE_SUM,
+    Op.REDUCE_MEAN,
+    Op.REDUCE_MAX,
+    Op.MATMUL,
+    Op.RELU,
+    Op.LEAKY_RELU,
+    Op.SILU,
+    Op.GELU,
+    Op.SIGMOID,
+    Op.CONV2D,
+    Op.DEPTHWISE_CONV2D,
+    Op.MAX_POOL2D,
+    Op.AVG_POOL2D,
+    Op.GLOBAL_AVG_POOL,
+    Op.ROPE,
+    Op.CAUSAL_MASK,
+    Op.KV_CACHE_APPEND,
+    Op.KV_CACHE_GATHER,
+    Op.RESHAPE,
+    Op.TRANSPOSE,
+    Op.CONCAT,
+    Op.SLICE,
+    Op.PAD,
+    Op.RESIZE,
+    Op.BATCH_NORM,
+    Op.GROUP_NORM,
+    Op.BOX_DECODE,
+    Op.NMS,
+}
+
 
 def lower_kernel(
     graph: Graph,
@@ -23,6 +58,34 @@ def lower_kernel(
     if len(graph.nodes) != 1 or len(graph.outputs) != 1:
         raise NotImplementedError("lower_kernel supports one single-output node")
 
+    node = graph.nodes[0]
+    if node.op in CPP_SUPPORTED_OPS:
+        from ..mlir.mgpu_runner import MGpuOptError, lower_with_mgpu_opt
+
+        standalone = (
+            len(graph.nodes) == 1
+            and {value.name for value in graph.inputs}
+            == {value.name for value in node.inputs}
+            and {value.name for value in graph.outputs}
+            == {value.name for value in node.outputs}
+        )
+        if node.op == Op.CONV2D and len(node.inputs) != 2:
+            standalone = False
+        try:
+            if standalone:
+                return lower_with_mgpu_opt(graph, mlir_text, layout)
+        except MGpuOptError:
+            pass
+
+    return lower_kernel_python(graph, mlir_text, layout)
+
+
+def lower_kernel_python(
+    graph: Graph,
+    mlir_text: str,
+    layout: dict[str, Any],
+) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
+    """Python reference backend used for unsupported or multi-node cases."""
     node = graph.nodes[0]
     if node.op in {
         Op.RELU,

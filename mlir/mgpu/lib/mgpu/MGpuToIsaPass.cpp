@@ -1166,7 +1166,10 @@ struct MGpuToIsaPass
       return std::nullopt;
 
     int64_t cacheBytes = memrefByteSize(cacheType);
-    int64_t positionsBytes = memrefByteSize(positionsType);
+    int64_t positionsElements = 1;
+    for (int64_t dim : positionsType.getShape())
+      positionsElements *= dim;
+    int64_t positionsBytes = positionsElements * 4;
     int64_t positionsBase = cacheBytes;
     int64_t outBase = cacheBytes + positionsBytes;
     int64_t dim = cacheType.getShape()[3];

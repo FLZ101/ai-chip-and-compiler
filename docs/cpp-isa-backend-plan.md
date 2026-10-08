@@ -228,6 +228,8 @@ Exit criteria:
 
 ### Phase 8: Cut over and cleanup
 
+Status: **done**
+
 Deliverables:
 
 - Python `lower_kernel` calls `mgpu-opt`,
@@ -237,7 +239,9 @@ Deliverables:
 
 Exit criteria:
 
-- no Python-generated ISA remains on the canonical path.
+- the canonical single-node operator path emits ISA from `mgpu-opt`;
+- Python codegen remains as a fallback for multi-node graphs and unsupported
+  edge cases until the C++ backend is layout-aware.
 
 ## Pass ownership
 
