@@ -40,6 +40,7 @@ class TimingModel:
     global_bandwidth_bytes_per_cycle: int = 128
     shared_bandwidth_bytes_per_cycle: int = 128
     bank_count: int = 32
+    shared_swizzle_bits: int = 3
 
 
 DEFAULT_TIMING_MODEL = TimingModel()

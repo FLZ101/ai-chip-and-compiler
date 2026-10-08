@@ -16,6 +16,7 @@ from .isa import (
     Reg,
 )
 from .memory import ByteMemory, RegisterFile, as_int
+from .mma import shared_bank_index
 from .timing import (
     DEFAULT_TIMING_MODEL,
     ProfileCounters,
@@ -463,10 +464,13 @@ def _detect_shared_bank_conflicts(
 ) -> int:
     """Count the extra shared-memory transactions caused by bank conflicts.
 
-    Shared memory is modeled as ``bank_count`` 4-byte banks.  Lanes that access
-    the same bank in the same instruction produce one additional transaction
-    for every lane after the first.  This is reported as a counter; the
-    functional simulator still serializes the accesses correctly.
+    Shared memory is modeled as ``bank_count`` 4-byte banks.  Addresses are
+    passed through the shared-memory swizzle pattern before the bank is
+    computed, so the reported counter reflects the physical bank layout used
+    by the later tensor-core path.  Lanes that access the same bank in the same
+    instruction produce one additional transaction for every lane after the
+    first.  This is reported as a counter; the functional simulator still
+    serializes the accesses correctly.
     """
     mem_operand = (
         instruction.dst if instruction.op in MEMORY_DEST_OPS else instruction.srcs[0]
@@ -477,7 +481,11 @@ def _detect_shared_bank_conflicts(
     bank_hits: dict[int, int] = {}
     for lane in warp.active_lanes:
         address = as_int(_read_operand(device, sm, warp, lane, mem_operand))
-        bank = (address // 4) % device.timing_model.bank_count
+        bank = shared_bank_index(
+            address,
+            bank_count=device.timing_model.bank_count,
+            swizzle_bits=device.timing_model.shared_swizzle_bits,
+        )
         bank_hits[bank] = bank_hits.get(bank, 0) + 1
 
     return sum(max(count - 1, 0) for count in bank_hits.values())

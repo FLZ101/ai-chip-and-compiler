@@ -124,6 +124,13 @@ class TestTimingModelEndToEnd(unittest.TestCase):
         self.assertGreater(profile.shared_bank_conflicts, 0)
         self.assertGreater(profile.shared_store_bytes, 0)
 
+    def test_shared_bank_conflict_counts_are_deterministic(self):
+        snapshots = [
+            self._launch_profile(BANK_CONFLICT_ASM)[1].as_dict() for _ in range(3)
+        ]
+        self.assertEqual(snapshots[0], snapshots[1])
+        self.assertEqual(snapshots[1], snapshots[2])
+
 
 if __name__ == "__main__":
     unittest.main()

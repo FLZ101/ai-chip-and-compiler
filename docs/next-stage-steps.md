@@ -419,6 +419,10 @@ Tests:
 
 ### 4.2 Add fragment layout and shared-memory swizzle
 
+Status: **done**
+
+Reference: [step-4.2.md](step-4.2.md)
+
 Implement:
 
 - A/B/C fragment layout,
