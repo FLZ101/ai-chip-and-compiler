@@ -215,6 +215,74 @@ def MGPU_RMSNormOp : MGPU_Op<"rms_norm", [MemoryEffects<[MemRead, MemWrite]>]> {
   }];
 }
 
+def MGPU_ReshapeOp : MGPU_Op<"reshape", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Reshape a buffer without changing element order";
+  let arguments = (ins AnyMemRef:$input,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = "$input `,` $output attr-dict `:` type($input) `,` type($output)";
+}
+
+def MGPU_TransposeOp : MGPU_Op<"transpose", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Transpose a rank-2 buffer";
+  let arguments = (ins AnyMemRef:$input,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = "$input `,` $output attr-dict `:` type($input) `,` type($output)";
+}
+
+def MGPU_ConcatOp : MGPU_Op<"concat", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Concatenate two rank-1 buffers";
+  let arguments = (ins AnyMemRef:$first,
+                       AnyMemRef:$second,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = [{
+    $first `,` $second `,` $output
+    attr-dict
+    `:` type($first) `,` type($second) `,` type($output)
+  }];
+}
+
+def MGPU_SliceOp : MGPU_Op<"slice", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Slice one rank-1 buffer";
+  let arguments = (ins AnyMemRef:$input,
+                       AnyMemRef:$output,
+                       I64Attr:$start,
+                       I64Attr:$step);
+  let results = (outs);
+  let assemblyFormat = [{
+    $input `,` $output
+    `start` `=` $start `,` `step` `=` $step
+    attr-dict
+    `:` type($input) `,` type($output)
+  }];
+}
+
+def MGPU_PadOp : MGPU_Op<"pad", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Pad one rank-1 buffer";
+  let arguments = (ins AnyMemRef:$input,
+                       AnyMemRef:$output,
+                       I64Attr:$before,
+                       I64Attr:$after,
+                       F32Attr:$value);
+  let results = (outs);
+  let assemblyFormat = [{
+    $input `,` $output
+    `before` `=` $before `,` `after` `=` $after `,` `value` `=` $value
+    attr-dict
+    `:` type($input) `,` type($output)
+  }];
+}
+
+def MGPU_ResizeOp : MGPU_Op<"resize", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Resize one rank-1 buffer with nearest-neighbor sampling";
+  let arguments = (ins AnyMemRef:$input,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = "$input `,` $output attr-dict `:` type($input) `,` type($output)";
+}
+
 def MGPU_QuantOp : MGPU_Op<"quant", [Pure]> {
   let summary = "Quantize a value using scale and zero point";
   let arguments = (ins AnyType:$input,

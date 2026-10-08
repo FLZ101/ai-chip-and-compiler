@@ -196,6 +196,8 @@ Exit criteria:
 
 ### Phase 6: Shape and layout
 
+Status: **done**
+
 Lower:
 
 - reshape,

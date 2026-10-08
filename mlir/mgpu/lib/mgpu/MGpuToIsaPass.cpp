@@ -233,6 +233,54 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->grid),
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
+      } else if (auto isa = emitReshapeIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitTransposeIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitConcatIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitSliceIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitPadIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitResizeIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
       } else if (auto isa = emitAttentionIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
@@ -1335,6 +1383,252 @@ struct MGpuToIsaPass
     IsaText isa;
     isa.code = code;
     isa.grid = std::to_string((rows + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitReshapeIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::ReshapeOp> ops;
+    launch.getBody().front().walk([&](mgpu::ReshapeOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto inputType = dyn_cast<MemRefType>(ops.front().getInput().getType());
+    auto outType = dyn_cast<MemRefType>(ops.front().getOutput().getType());
+    if (!inputType || !outType)
+      return std::nullopt;
+    int64_t n = 1;
+    for (int64_t dim : outType.getShape())
+      n *= dim;
+    int64_t outDelta = memrefByteSize(inputType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, n);
+    os << "MUL R3, R0, 4\n"
+       << "LDG R5, [R3]\n"
+       << "STG [R3 + " << outDelta << "], R5\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((n + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitTransposeIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::TransposeOp> ops;
+    launch.getBody().front().walk(
+        [&](mgpu::TransposeOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto inputType = dyn_cast<MemRefType>(ops.front().getInput().getType());
+    auto outType = dyn_cast<MemRefType>(ops.front().getOutput().getType());
+    if (!inputType || !outType || inputType.getRank() != 2 ||
+        outType.getRank() != 2)
+      return std::nullopt;
+    int64_t rows = inputType.getShape()[0];
+    int64_t cols = inputType.getShape()[1];
+    int64_t outBase = memrefByteSize(inputType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, tid.x\n"
+       << "MOV R1, tid.y\n"
+       << "MUL R2, R0, " << cols << "\n"
+       << "ADD R2, R2, R1\n"
+       << "MUL R2, R2, 4\n"
+       << "LDG R4, [R2]\n"
+       << "MUL R5, R1, " << rows << "\n"
+       << "ADD R5, R5, R0\n"
+       << "MUL R5, R5, 4\n"
+       << "ADD R5, R5, " << outBase << "\n"
+       << "STG [R5], R4\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = "1x1x1";
+    isa.block = std::to_string(rows) + "x" + std::to_string(cols) + "x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitConcatIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::ConcatOp> ops;
+    launch.getBody().front().walk([&](mgpu::ConcatOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    auto firstType = dyn_cast<MemRefType>(op.getFirst().getType());
+    auto secondType = dyn_cast<MemRefType>(op.getSecond().getType());
+    auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!firstType || !secondType || !outType || firstType.getRank() != 1 ||
+        secondType.getRank() != 1 || outType.getRank() != 1)
+      return std::nullopt;
+    int64_t firstLen = firstType.getShape()[0];
+    int64_t secondLen = secondType.getShape()[0];
+    int64_t n = outType.getShape()[0];
+    int64_t secondBase = memrefByteSize(firstType);
+    int64_t outBase = secondBase + memrefByteSize(secondType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, n);
+    os << "MOV R2, " << firstLen << "\n"
+       << "CMP.LT R3, R0, R2\n"
+       << "BRA first, R3, end\n"
+       << "BRA second\n"
+       << "first:\n"
+       << "MUL R4, R0, 4\n"
+       << "LDG R6, [R4]\n"
+       << "BRA store\n"
+       << "second:\n"
+       << "MOV R4, R0\n"
+       << "MOV R5, " << firstLen << "\n"
+       << "SUB R4, R4, R5\n"
+       << "MUL R4, R4, 4\n"
+       << "ADD R4, R4, " << secondBase << "\n"
+       << "LDG R6, [R4]\n"
+       << "BRA store\n"
+       << "store:\n"
+       << "MUL R7, R0, 4\n"
+       << "ADD R7, R7, " << outBase << "\n"
+       << "STG [R7], R6\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((n + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitSliceIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::SliceOp> ops;
+    launch.getBody().front().walk([&](mgpu::SliceOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
+    auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!inputType || !outType || inputType.getRank() != 1 ||
+        outType.getRank() != 1)
+      return std::nullopt;
+    int64_t n = outType.getShape()[0];
+    int64_t start = op.getStart();
+    int64_t step = op.getStep();
+    int64_t outBase = memrefByteSize(inputType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, n);
+    os << "MOV R2, R0\n"
+       << "MUL R2, R2, " << step << "\n"
+       << "ADD R2, R2, " << start << "\n"
+       << "MUL R2, R2, 4\n"
+       << "LDG R4, [R2]\n"
+       << "MUL R5, R0, 4\n"
+       << "ADD R5, R5, " << outBase << "\n"
+       << "STG [R5], R4\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((n + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitPadIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::PadOp> ops;
+    launch.getBody().front().walk([&](mgpu::PadOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
+    auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!inputType || !outType || inputType.getRank() != 1 ||
+        outType.getRank() != 1)
+      return std::nullopt;
+    int64_t before = op.getBefore();
+    int64_t inputLen = inputType.getShape()[0];
+    int64_t n = outType.getShape()[0];
+    int64_t outBase = memrefByteSize(inputType);
+    double value = op.getValue().convertToDouble();
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, n);
+    os << "MOV R3, " << before << "\n"
+       << "SUB R4, R0, R3\n"
+       << "CMP.GE R5, R4, 0\n"
+       << "MOV R6, " << inputLen << "\n"
+       << "CMP.LT R7, R4, R6\n"
+       << "MUL R8, R5, R7\n"
+       << "MOV R9, 0\n"
+       << "MAX R10, R4, R9\n"
+       << "MOV R9, " << (inputLen - 1) << "\n"
+       << "MIN R10, R10, R9\n"
+       << "MUL R10, R10, 4\n"
+       << "LDG R12, [R10]\n"
+       << "MOV R13, " << value << "\n"
+       << "SEL R14, R8, R12, R13\n"
+       << "MUL R10, R0, 4\n"
+       << "ADD R10, R10, " << outBase << "\n"
+       << "STG [R10], R14\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((n + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitResizeIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::ResizeOp> ops;
+    launch.getBody().front().walk(
+        [&](mgpu::ResizeOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto inputType = dyn_cast<MemRefType>(ops.front().getInput().getType());
+    auto outType = dyn_cast<MemRefType>(ops.front().getOutput().getType());
+    if (!inputType || !outType || inputType.getRank() != 1 ||
+        outType.getRank() != 1)
+      return std::nullopt;
+    int64_t inputLen = inputType.getShape()[0];
+    int64_t outputLen = outType.getShape()[0];
+    int64_t outBase = memrefByteSize(inputType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, outputLen);
+    os << "MOV R2, R0\n"
+       << "MUL R2, R2, " << inputLen << "\n"
+       << "MOV R3, " << outputLen << "\n"
+       << "IDIV R4, R2, R3\n"
+       << "MUL R4, R4, 4\n"
+       << "LDG R6, [R4]\n"
+       << "MUL R7, R0, 4\n"
+       << "ADD R7, R7, " << outBase << "\n"
+       << "STG [R7], R6\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((outputLen + 31) / 32) + "x1x1";
     isa.block = "32x1x1";
     return isa;
   }

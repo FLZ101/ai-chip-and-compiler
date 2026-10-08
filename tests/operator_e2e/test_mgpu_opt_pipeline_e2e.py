@@ -572,6 +572,119 @@ module {
         expected = x / rms * weight
         np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
 
+    def test_reshape_uses_mgpu_opt(self):
+        x = np.arange(16, dtype=np.float32)
+        frontend = ManualFrontend("reshape")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        frontend.output(frontend.reshape(value, (4, 4)))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.tolist())
+        device.global_memory.load_floats(x.nbytes, [0.0] * x.size)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(x.nbytes, x.size), dtype=np.float32
+        ).reshape(4, 4)
+        np.testing.assert_array_equal(actual, x.reshape(4, 4))
+
+    def test_transpose_uses_mgpu_opt(self):
+        x = np.arange(6, dtype=np.float32).reshape(2, 3)
+        frontend = ManualFrontend("transpose")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        frontend.output(frontend.transpose(value, (1, 0)))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.reshape(-1).tolist())
+        device.global_memory.load_floats(x.nbytes, [0.0] * x.size)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(x.nbytes, x.size), dtype=np.float32
+        ).reshape(3, 2)
+        np.testing.assert_array_equal(actual, x.T)
+
+    def test_concat_uses_mgpu_opt(self):
+        a = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        b = np.array([4.0, 5.0, 6.0, 7.0], dtype=np.float32)
+        frontend = ManualFrontend("concat")
+        av = frontend.add_input("a", DType.F32, a.shape)
+        bv = frontend.add_input("b", DType.F32, b.shape)
+        frontend.output(frontend.concat(av, bv, axis=0))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, a.tolist())
+        device.global_memory.load_floats(a.nbytes, b.tolist())
+        output_base = a.nbytes + b.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * (a.size + b.size))
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, a.size + b.size),
+            dtype=np.float32,
+        )
+        np.testing.assert_array_equal(actual, np.concatenate([a, b]))
+
+    def test_slice_uses_mgpu_opt(self):
+        x = np.arange(8, dtype=np.float32)
+        frontend = ManualFrontend("slice")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        frontend.output(frontend.slice(value, (2,), (6,), steps=(1,)))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.tolist())
+        device.global_memory.load_floats(x.nbytes, [0.0] * 4)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(x.nbytes, 4), dtype=np.float32
+        )
+        np.testing.assert_array_equal(actual, x[2:6])
+
+    def test_pad_uses_mgpu_opt(self):
+        x = np.arange(4, dtype=np.float32)
+        frontend = ManualFrontend("pad")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        frontend.output(frontend.pad(value, ((1, 2),), value=-1.0))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.tolist())
+        device.global_memory.load_floats(x.nbytes, [0.0] * 7)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(x.nbytes, 7), dtype=np.float32
+        )
+        np.testing.assert_array_equal(actual, np.pad(x, (1, 2), constant_values=-1.0))
+
+    def test_resize_uses_mgpu_opt(self):
+        x = np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float32)
+        frontend = ManualFrontend("resize")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        frontend.output(frontend.resize(value, sizes=(8,)))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.tolist())
+        device.global_memory.load_floats(x.nbytes, [0.0] * 8)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(x.nbytes, 8), dtype=np.float32
+        )
+        np.testing.assert_array_equal(actual, np.repeat(x, 2))
+
 
 if __name__ == "__main__":
     unittest.main()

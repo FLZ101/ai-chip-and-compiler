@@ -386,6 +386,64 @@ class MLIRBuilder:
     def _emit_shape_placeholder(
         self, node: Node, result_name: str, indent: str
     ) -> list[str]:
+        if node.op == Op.RESHAPE:
+            value = node.inputs[0]
+            output = node.outputs[0]
+            return [
+                f"{indent}mgpu.reshape {self._value_names[value.name]}, "
+                f"{result_name} : {self._memref_type(value)}, "
+                f"{self._memref_type(output)}"
+            ]
+        if node.op == Op.TRANSPOSE:
+            value = node.inputs[0]
+            output = node.outputs[0]
+            return [
+                f"{indent}mgpu.transpose {self._value_names[value.name]}, "
+                f"{result_name} : {self._memref_type(value)}, "
+                f"{self._memref_type(output)}"
+            ]
+        if node.op == Op.CONCAT:
+            first, second = node.inputs
+            output = node.outputs[0]
+            return [
+                f"{indent}mgpu.concat {self._value_names[first.name]}, "
+                f"{self._value_names[second.name]}, {result_name} : "
+                f"{self._memref_type(first)}, {self._memref_type(second)}, "
+                f"{self._memref_type(output)}"
+            ]
+        if node.op == Op.SLICE:
+            value = node.inputs[0]
+            output = node.outputs[0]
+            starts = tuple(node.attrs.get("starts", (0,)))
+            steps = tuple(node.attrs.get("steps", (1,)))
+            start = int(starts[0])
+            step = int(steps[0])
+            return [
+                f"{indent}mgpu.slice {self._value_names[value.name]}, "
+                f"{result_name} start = {start}, step = {step} : "
+                f"{self._memref_type(value)}, {self._memref_type(output)}"
+            ]
+        if node.op == Op.PAD:
+            value = node.inputs[0]
+            output = node.outputs[0]
+            pads = tuple(node.attrs.get("pads", ((0, 0),)))
+            before, after = int(pads[0][0]), int(pads[0][1])
+            pad_value = float(node.attrs.get("value", 0.0))
+            return [
+                f"{indent}mgpu.pad {self._value_names[value.name]}, "
+                f"{result_name} before = {before}, after = {after}, "
+                f"value = {pad_value!r} : {self._memref_type(value)}, "
+                f"{self._memref_type(output)}"
+            ]
+        if node.op == Op.RESIZE:
+            value = node.inputs[0]
+            output = node.outputs[0]
+            return [
+                f"{indent}mgpu.resize {self._value_names[value.name]}, "
+                f"{result_name} : {self._memref_type(value)}, "
+                f"{self._memref_type(output)}"
+            ]
+
         value = node.inputs[0]
         output = node.outputs[0]
         scalar_type = self._scalar_type(output.dtype)
