@@ -180,6 +180,8 @@ Exit criteria:
 
 ### Phase 5: Transformer normalization
 
+Status: **done**
+
 Lower:
 
 - softmax,

@@ -209,6 +209,30 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->grid),
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
+      } else if (auto isa = emitSoftmaxIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitLayerNormIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitRMSNormIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
       } else if (auto isa = emitAttentionIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
@@ -1092,6 +1116,225 @@ struct MGpuToIsaPass
     IsaText isa;
     isa.code = code;
     isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitSoftmaxIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::SoftmaxOp> ops;
+    launch.getBody().front().walk([&](mgpu::SoftmaxOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto xType = dyn_cast<MemRefType>(ops.front().getX().getType());
+    auto outType = dyn_cast<MemRefType>(ops.front().getOutput().getType());
+    if (!xType || !outType || xType.getRank() != 2 || outType.getRank() != 2)
+      return std::nullopt;
+    int64_t rows = xType.getShape()[0];
+    int64_t dim = xType.getShape()[1];
+    int64_t xBase = 0;
+    int64_t outBase = memrefByteSize(xType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, rows);
+    os << "MOV R20, -1000000000.0\n";
+    for (int64_t d = 0; d < dim; ++d) {
+      os << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << xBase << "\n"
+         << "LDG R4, [R2]\n"
+         << "MAX R20, R20, R4\n";
+    }
+    os << "MOV R21, 0\n";
+    for (int64_t d = 0; d < dim; ++d) {
+      os << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << xBase << "\n"
+         << "LDG R4, [R2]\n"
+         << "SUB R4, R4, R20\n"
+         << "MUL R4, R4, 1.4426950408889634\n"
+         << "EXP2 R5, R4\n"
+         << "ADD R21, R21, R5\n";
+    }
+    for (int64_t d = 0; d < dim; ++d) {
+      os << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << xBase << "\n"
+         << "LDG R4, [R2]\n"
+         << "SUB R4, R4, R20\n"
+         << "MUL R4, R4, 1.4426950408889634\n"
+         << "EXP2 R5, R4\n"
+         << "RCP R6, R21\n"
+         << "MUL R5, R5, R6\n"
+         << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << outBase << "\n"
+         << "STG [R2], R5\n";
+    }
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((rows + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitLayerNormIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::LayerNormOp> ops;
+    launch.getBody().front().walk(
+        [&](mgpu::LayerNormOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    auto xType = dyn_cast<MemRefType>(op.getX().getType());
+    auto weightType = dyn_cast<MemRefType>(op.getWeight().getType());
+    auto biasType = dyn_cast<MemRefType>(op.getBias().getType());
+    auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!xType || !weightType || !biasType || !outType || xType.getRank() != 2)
+      return std::nullopt;
+    int64_t rows = xType.getShape()[0];
+    int64_t dim = xType.getShape()[1];
+    int64_t xBase = 0;
+    int64_t weightBase = memrefByteSize(xType);
+    int64_t biasBase = weightBase + memrefByteSize(weightType);
+    int64_t outBase = biasBase + memrefByteSize(biasType);
+    double eps = 1e-5;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, rows);
+    os << "MOV R20, 0\n"
+       << "MOV R21, 0\n";
+    for (int64_t d = 0; d < dim; ++d) {
+      os << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << xBase << "\n"
+         << "LDG R4, [R2]\n"
+         << "ADD R20, R20, R4\n"
+         << "MUL R5, R4, R4\n"
+         << "ADD R21, R21, R5\n";
+    }
+    os << "MOV R2, " << dim << "\n"
+       << "DIV R22, R20, R2\n"
+       << "DIV R23, R21, R2\n"
+       << "MUL R24, R22, R22\n"
+       << "SUB R23, R23, R24\n"
+       << "ADD R23, R23, " << eps << "\n"
+       << "RSQRT R24, R23\n";
+    for (int64_t d = 0; d < dim; ++d) {
+      os << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << xBase << "\n"
+         << "LDG R4, [R2]\n"
+         << "SUB R4, R4, R22\n"
+         << "MUL R4, R4, R24\n"
+         << "MOV R5, " << d << "\n"
+         << "MUL R5, R5, 4\n"
+         << "ADD R5, R5, " << weightBase << "\n"
+         << "LDG R7, [R5]\n"
+         << "MUL R4, R4, R7\n"
+         << "MOV R5, " << d << "\n"
+         << "MUL R5, R5, 4\n"
+         << "ADD R5, R5, " << biasBase << "\n"
+         << "LDG R7, [R5]\n"
+         << "ADD R4, R4, R7\n"
+         << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << outBase << "\n"
+         << "STG [R2], R4\n";
+    }
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((rows + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitRMSNormIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::RMSNormOp> ops;
+    launch.getBody().front().walk(
+        [&](mgpu::RMSNormOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    auto xType = dyn_cast<MemRefType>(op.getX().getType());
+    auto weightType = dyn_cast<MemRefType>(op.getWeight().getType());
+    auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!xType || !weightType || !outType || xType.getRank() != 2)
+      return std::nullopt;
+    int64_t rows = xType.getShape()[0];
+    int64_t dim = xType.getShape()[1];
+    int64_t xBase = 0;
+    int64_t weightBase = memrefByteSize(xType);
+    int64_t outBase = weightBase + memrefByteSize(weightType);
+    double eps = 1e-5;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, rows);
+    os << "MOV R20, 0\n";
+    for (int64_t d = 0; d < dim; ++d) {
+      os << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << xBase << "\n"
+         << "LDG R4, [R2]\n"
+         << "MUL R4, R4, R4\n"
+         << "ADD R20, R20, R4\n";
+    }
+    os << "MOV R2, " << dim << "\n"
+       << "DIV R21, R20, R2\n"
+       << "ADD R21, R21, " << eps << "\n"
+       << "RSQRT R22, R21\n";
+    for (int64_t d = 0; d < dim; ++d) {
+      os << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << xBase << "\n"
+         << "LDG R4, [R2]\n"
+         << "MUL R4, R4, R22\n"
+         << "MOV R5, " << d << "\n"
+         << "MUL R5, R5, 4\n"
+         << "ADD R5, R5, " << weightBase << "\n"
+         << "LDG R7, [R5]\n"
+         << "MUL R4, R4, R7\n"
+         << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << outBase << "\n"
+         << "STG [R2], R4\n";
+    }
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((rows + 31) / 32) + "x1x1";
     isa.block = "32x1x1";
     return isa;
   }

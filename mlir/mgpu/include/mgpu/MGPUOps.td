@@ -180,6 +180,41 @@ def MGPU_KVCacheGatherOp : MGPU_Op<"kv_cache_gather", [MemoryEffects<[MemRead, M
   }];
 }
 
+def MGPU_SoftmaxOp : MGPU_Op<"softmax", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Row-wise softmax";
+  let arguments = (ins AnyMemRef:$x,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = "$x `,` $output attr-dict `:` type($x) `,` type($output)";
+}
+
+def MGPU_LayerNormOp : MGPU_Op<"layer_norm", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Layer normalization";
+  let arguments = (ins AnyMemRef:$x,
+                       AnyMemRef:$weight,
+                       AnyMemRef:$bias,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = [{
+    $x `,` $weight `,` $bias `,` $output
+    attr-dict
+    `:` type($x) `,` type($weight) `,` type($bias) `,` type($output)
+  }];
+}
+
+def MGPU_RMSNormOp : MGPU_Op<"rms_norm", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "RMS normalization";
+  let arguments = (ins AnyMemRef:$x,
+                       AnyMemRef:$weight,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = [{
+    $x `,` $weight `,` $output
+    attr-dict
+    `:` type($x) `,` type($weight) `,` type($output)
+  }];
+}
+
 def MGPU_QuantOp : MGPU_Op<"quant", [Pure]> {
   let summary = "Quantize a value using scale and zero point";
   let arguments = (ins AnyType:$input,

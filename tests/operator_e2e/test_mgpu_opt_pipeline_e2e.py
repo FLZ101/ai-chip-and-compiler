@@ -470,6 +470,108 @@ module {{
             atol=1e-5,
         )
 
+    @staticmethod
+    def _softmax_reference_2d(x):
+        shifted = x - np.max(x, axis=1, keepdims=True)
+        exp = np.exp(shifted)
+        return exp / np.sum(exp, axis=1, keepdims=True)
+
+    def test_softmax_uses_mgpu_opt(self):
+        x = np.array(
+            [[1.0, 2.0, 3.0, 4.0], [1000.0, 1000.0, 1000.0, 1000.0]],
+            dtype=np.float32,
+        )
+        mlir = """
+module {
+  func.func @softmax(%x: memref<2x4xf32>, %out: memref<2x4xf32>) {
+    %c1 = arith.constant 1 : index
+    mgpu.launch blocks(%c1, %c1, %c1) threads(%c1, %c1, %c1) {
+      mgpu.softmax %x, %out : memref<2x4xf32>, memref<2x4xf32>
+      mgpu.return
+    }
+    return
+  }
+}
+"""
+        result = run_mgpu_pipeline(mlir)
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.reshape(-1).tolist())
+        device.global_memory.load_floats(x.nbytes, [0.0] * x.size)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(x.nbytes, x.size), dtype=np.float32
+        ).reshape(x.shape)
+        np.testing.assert_allclose(
+            actual, self._softmax_reference_2d(x), rtol=1e-4, atol=1e-5
+        )
+
+    def test_layer_norm_uses_mgpu_opt(self):
+        x = np.arange(16, dtype=np.float32).reshape(4, 4)
+        weight = np.array([1.0, 2.0, 0.5, 1.5], dtype=np.float32)
+        bias = np.array([0.0, 0.5, -0.5, 1.0], dtype=np.float32)
+        mlir = """
+module {
+  func.func @layernorm(%x: memref<4x4xf32>, %w: memref<4xf32>, %b: memref<4xf32>, %out: memref<4x4xf32>) {
+    %c1 = arith.constant 1 : index
+    mgpu.launch blocks(%c1, %c1, %c1) threads(%c1, %c1, %c1) {
+      mgpu.layer_norm %x, %w, %b, %out : memref<4x4xf32>, memref<4xf32>, memref<4xf32>, memref<4x4xf32>
+      mgpu.return
+    }
+    return
+  }
+}
+"""
+        result = run_mgpu_pipeline(mlir)
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.reshape(-1).tolist())
+        device.global_memory.load_floats(x.nbytes, weight.tolist())
+        device.global_memory.load_floats(x.nbytes + weight.nbytes, bias.tolist())
+        output_base = x.nbytes + weight.nbytes + bias.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * x.size)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, x.size), dtype=np.float32
+        ).reshape(x.shape)
+        mean = x.mean(axis=1, keepdims=True)
+        var = x.var(axis=1, keepdims=True)
+        expected = (x - mean) / np.sqrt(var + 1e-5) * weight + bias
+        np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
+    def test_rms_norm_uses_mgpu_opt(self):
+        x = np.arange(16, dtype=np.float32).reshape(4, 4)
+        weight = np.array([1.0, 1.0, 2.0, 2.0], dtype=np.float32)
+        mlir = """
+module {
+  func.func @rmsnorm(%x: memref<4x4xf32>, %w: memref<4xf32>, %out: memref<4x4xf32>) {
+    %c1 = arith.constant 1 : index
+    mgpu.launch blocks(%c1, %c1, %c1) threads(%c1, %c1, %c1) {
+      mgpu.rms_norm %x, %w, %out : memref<4x4xf32>, memref<4xf32>, memref<4x4xf32>
+      mgpu.return
+    }
+    return
+  }
+}
+"""
+        result = run_mgpu_pipeline(mlir)
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, x.reshape(-1).tolist())
+        device.global_memory.load_floats(x.nbytes, weight.tolist())
+        output_base = x.nbytes + weight.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * x.size)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, x.size), dtype=np.float32
+        ).reshape(x.shape)
+        rms = np.sqrt(np.mean(x * x, axis=1, keepdims=True) + 1e-5)
+        expected = x / rms * weight
+        np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
 
 if __name__ == "__main__":
     unittest.main()
