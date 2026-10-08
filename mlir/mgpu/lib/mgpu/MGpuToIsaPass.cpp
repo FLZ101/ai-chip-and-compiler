@@ -111,6 +111,14 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->grid),
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
+      } else if (auto isa = emitLinalgGenericIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
       } else if (auto isa = emitMatmulIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
@@ -240,6 +248,164 @@ struct MGpuToIsaPass
     generic.getRegion().walk(
         [&](arith::AddFOp) { found = true; });
     return found;
+  }
+
+  static std::optional<std::string> binaryArithOpcode(linalg::GenericOp generic) {
+    std::string opcode;
+    generic.getRegion().walk([&](Operation *op) {
+      if (isa<arith::AddFOp>(op))
+        opcode = "ADD";
+      else if (isa<arith::SubFOp>(op))
+        opcode = "SUB";
+      else if (isa<arith::MulFOp>(op))
+        opcode = "MUL";
+      else if (isa<arith::DivFOp>(op))
+        opcode = "DIV";
+    });
+    if (opcode.empty())
+      return std::nullopt;
+    return opcode;
+  }
+
+  static std::optional<std::string> reductionArithOpcode(
+      linalg::GenericOp generic, bool &divideByCount) {
+    std::string opcode;
+    divideByCount = false;
+    generic.getRegion().walk([&](Operation *op) {
+      if (isa<arith::AddFOp>(op))
+        opcode = "ADD";
+      else if (isa<arith::MaximumFOp>(op))
+        opcode = "MAX";
+      else if (isa<arith::DivFOp>(op))
+        divideByCount = true;
+    });
+    if (opcode.empty())
+      return std::nullopt;
+    return opcode;
+  }
+
+  std::optional<IsaText> emitLinalgGenericIsa(mgpu::LaunchOp launch) {
+    SmallVector<linalg::GenericOp> generics;
+    launch.getBody().front().walk(
+        [&](linalg::GenericOp generic) { generics.push_back(generic); });
+
+    for (linalg::GenericOp generic : generics) {
+      if (auto isa = emitBinaryGenericIsa(launch, generic))
+        return isa;
+      if (auto isa = emitReductionGenericIsa(launch, generic))
+        return isa;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<IsaText> emitBinaryGenericIsa(mgpu::LaunchOp launch,
+                                               linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 2 || dstOp.getDpsInits().empty())
+      return std::nullopt;
+
+    auto opcode = binaryArithOpcode(generic);
+    if (!opcode)
+      return std::nullopt;
+
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!outputType || outputType.getRank() != 1)
+      return std::nullopt;
+
+    int64_t n = outputType.getShape()[0];
+    int64_t blockSize = 32;
+    int64_t gridX = (n + blockSize - 1) / blockSize;
+    int64_t leftDelta = n * 4;
+    int64_t outputDelta = 2 * n * 4;
+
+    VirtualRegisterAllocator regs;
+    int tid = regs.acquire();
+    int limit = regs.acquire();
+    int pred = regs.acquire();
+    int addr = regs.acquire();
+    int left = regs.acquire();
+    int right = regs.acquire();
+    int result = regs.acquire();
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV " << regs.name(tid) << ", ctaid.x\n"
+       << "MUL " << regs.name(tid) << ", " << regs.name(tid) << ", ntid.x\n"
+       << "ADD " << regs.name(tid) << ", " << regs.name(tid) << ", tid.x\n"
+       << "MOV " << regs.name(limit) << ", " << n << "\n"
+       << "CMP.LT " << regs.name(pred) << ", " << regs.name(tid) << ", "
+       << regs.name(limit) << "\n"
+       << "BRA body, " << regs.name(pred) << ", end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MUL " << regs.name(addr) << ", " << regs.name(tid) << ", 4\n"
+       << "LDG " << regs.name(left) << ", [" << regs.name(addr) << "]\n"
+       << "LDG " << regs.name(right) << ", [" << regs.name(addr) << " + "
+       << leftDelta << "]\n"
+       << *opcode << " " << regs.name(result) << ", " << regs.name(left) << ", "
+       << regs.name(right) << "\n"
+       << "STG [" << regs.name(addr) << " + " << outputDelta << "], "
+       << regs.name(result) << "\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = std::to_string(blockSize) + "x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitReductionGenericIsa(mgpu::LaunchOp launch,
+                                                  linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    bool divideByCount = false;
+    auto opcode = reductionArithOpcode(generic, divideByCount);
+    if (!opcode)
+      return std::nullopt;
+
+    auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!inputType || !outputType || inputType.getRank() != 1 ||
+        outputType.getRank() != 0)
+      return std::nullopt;
+
+    int64_t n = inputType.getShape()[0];
+    std::string identity = (*opcode == "MAX") ? "-1.0e30" : "0";
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, tid.x\n"
+       << "MOV R1, 0\n"
+       << "CMP.EQ R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MOV R3, " << identity << "\n";
+    for (int64_t i = 0; i < n; ++i) {
+      os << "MOV R4, " << (i * 4) << "\n"
+         << "LDG R5, [R4]\n"
+         << *opcode << " R3, R3, R5\n";
+    }
+    if (divideByCount)
+      os << "DIV R3, R3, " << n << "\n";
+    os << "MOV R4, " << (n * 4) << "\n"
+       << "STG [R4], R3\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = "1x1x1";
+    isa.block = "32x1x1";
+    return isa;
   }
 
   static void emitFragmentLoad(llvm::raw_ostream &os, int dest, int rowGroup,

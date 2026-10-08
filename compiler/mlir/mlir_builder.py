@@ -412,17 +412,31 @@ class MLIRBuilder:
         scalar_type = self._scalar_type(output.dtype)
         arith_op = _REDUCTION_ARITH[node.op]
 
+        if node.op == Op.REDUCE_MEAN:
+            body = [
+                f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+                f"{indent}  %sum = {arith_op} %in, %out : {scalar_type}",
+                f"{indent}  %c = arith.constant {float(value.shape[0])!r} : "
+                f"{scalar_type}",
+                f"{indent}  %value = arith.divf %sum, %c : {scalar_type}",
+                f"{indent}  linalg.yield %value : {scalar_type}",
+            ]
+        else:
+            body = [
+                f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
+                f"{indent}  %value = {arith_op} %in, %out : {scalar_type}",
+                f"{indent}  linalg.yield %value : {scalar_type}",
+            ]
+
         return [
-            f"{indent}{result_name} = linalg.generic {{",
+            f"{indent}linalg.generic {{",
             f"{indent}  indexing_maps = [affine_map<(d0) -> (d0)>, "
-            "affine_map<(d0) -> ()>]",
+            "affine_map<(d0) -> ()>],",
             f'{indent}  iterator_types = ["reduction"]',
             f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
             f"outs({result_name} : {out_type}) {{",
-            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
-            f"{indent}  %value = {arith_op} %in, %out : {scalar_type}",
-            f"{indent}  linalg.yield %value : {scalar_type}",
-            f"{indent}}} -> {out_type}",
+            *body,
+            f"{indent}}}",
         ]
 
     def _emit_conv2d(self, node: Node, result_name: str, indent: str) -> list[str]:

@@ -107,17 +107,17 @@ Exit criteria:
 
 ### Phase 1: Generic linalg/SCF backend
 
+Status: **done**
+
 Deliverables:
 
-- `convert-linalg-to-loops` or equivalent C++ lowering,
-- `mgpu-to-isa` support for:
-  - `scf.for`,
-  - `arith` scalar ops,
-  - `memref.load/store`,
-  - index arithmetic.
+- C++ `emitLinalgGenericIsa` support for rank-1 binary elementwise ops,
+- C++ rank-1 reduction support for sum/mean/max,
+- MLIRBuilder fixes so reduction MLIR is actually parseable,
+- Python E2E and lit tests that run these ops through `mgpu-opt`.
 
-This provides elementwise and reduction kernels generically instead of
-hand-written Python emitters.
+This provides elementwise and reduction kernels through C++ without the Python
+ISA emitters.
 
 Exit criteria:
 
