@@ -141,6 +141,8 @@ Exit criteria:
 
 ### Phase 3: CNN
 
+Status: **done**
+
 Extend C++ lowerings for:
 
 - conv2d,

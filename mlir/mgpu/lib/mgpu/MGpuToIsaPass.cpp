@@ -145,6 +145,38 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->grid),
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
+      } else if (auto isa = emitDepthwiseConvIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitPoolingIsa(launch, /*maxPool=*/true)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitPoolingIsa(launch, /*maxPool=*/false)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitGlobalAvgPoolIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
       } else if (auto isa = emitAttentionIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
@@ -546,6 +578,291 @@ struct MGpuToIsaPass
       isa.code = code;
       isa.grid = std::to_string(gridX) + "x1x1";
       isa.block = std::to_string(blockSize) + "x1x1";
+      return isa;
+    }
+    return std::nullopt;
+  }
+
+  static void emitCnnPrologue(llvm::raw_ostream &os, int64_t total) {
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << total << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n";
+  }
+
+  static void emitCnnFinish(llvm::raw_ostream &os) {
+    os << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+  }
+
+  std::optional<IsaText> emitDepthwiseConvIsa(mgpu::LaunchOp launch) {
+    SmallVector<linalg::DepthwiseConv2DNchwChwOp> ops;
+    launch.getBody().front().walk(
+        [&](linalg::DepthwiseConv2DNchwChwOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    if (op.getInputs().size() < 2 || op.getOutputs().empty())
+      return std::nullopt;
+
+    auto imageType = dyn_cast<MemRefType>(op.getInputs()[0].getType());
+    auto weightType = dyn_cast<MemRefType>(op.getInputs()[1].getType());
+    auto outputType = dyn_cast<MemRefType>(op.getOutputs()[0].getType());
+    if (!imageType || !weightType || !outputType)
+      return std::nullopt;
+    if (imageType.getRank() != 4 || weightType.getRank() != 3 ||
+        outputType.getRank() != 4)
+      return std::nullopt;
+
+    int64_t n = imageType.getShape()[0];
+    int64_t c = imageType.getShape()[1];
+    int64_t h = imageType.getShape()[2];
+    int64_t w = imageType.getShape()[3];
+    int64_t kh = weightType.getShape()[1];
+    int64_t kw = weightType.getShape()[2];
+    int64_t oh = outputType.getShape()[2];
+    int64_t ow = outputType.getShape()[3];
+    if (n != 1)
+      return std::nullopt;
+
+    int64_t total = c * oh * ow;
+    int64_t imageBase = 0;
+    int64_t weightBase = n * c * h * w * 4;
+    int64_t outputBase = weightBase + c * kh * kw * 4;
+    int64_t strideY = 1;
+    int64_t strideX = 1;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, total);
+    os << "IDIV R1, R0, " << (oh * ow) << "\n"
+       << "MUL R4, R1, " << (oh * ow) << "\n"
+       << "SUB R5, R0, R4\n"
+       << "IDIV R2, R5, " << ow << "\n"
+       << "MUL R6, R2, " << ow << "\n"
+       << "SUB R3, R5, R6\n"
+       << "MOV R20, 0\n";
+
+    for (int64_t ky = 0; ky < kh; ++ky) {
+      for (int64_t kx = 0; kx < kw; ++kx) {
+        int64_t ihConst = ky;
+        int64_t iwConst = kx;
+        os << "MOV R4, " << strideY << "\n"
+           << "MUL R4, R2, R4\n"
+           << "ADD R4, R4, " << ihConst << "\n"
+           << "CMP.GE R5, R4, 0\n"
+           << "MOV R6, " << h << "\n"
+           << "CMP.LT R7, R4, R6\n"
+           << "MUL R8, R5, R7\n"
+           << "MOV R9, 0\n"
+           << "MAX R10, R4, R9\n"
+           << "MOV R9, " << (h - 1) << "\n"
+           << "MIN R10, R10, R9\n"
+           << "MOV R11, " << strideX << "\n"
+           << "MUL R11, R3, R11\n"
+           << "ADD R11, R11, " << iwConst << "\n"
+           << "CMP.GE R12, R11, 0\n"
+           << "MOV R13, " << w << "\n"
+           << "CMP.LT R14, R11, R13\n"
+           << "MUL R15, R12, R14\n"
+           << "MUL R18, R8, R15\n"
+           << "MOV R16, 0\n"
+           << "MAX R17, R11, R16\n"
+           << "MOV R16, " << (w - 1) << "\n"
+           << "MIN R17, R17, R16\n"
+           << "MOV R19, " << h << "\n"
+           << "MUL R19, R1, R19\n"
+           << "ADD R19, R19, R10\n"
+           << "MUL R19, R19, " << w << "\n"
+           << "ADD R19, R19, R17\n"
+           << "MUL R19, R19, 4\n"
+           << "ADD R19, R19, " << imageBase << "\n"
+           << "LDG R6, [R19]\n"
+           << "MOV R7, 0\n"
+           << "SEL R8, R18, R6, R7\n"
+           << "MOV R9, " << kh << "\n"
+           << "MUL R9, R1, R9\n"
+           << "ADD R9, R9, " << ky << "\n"
+           << "MUL R9, R9, " << kw << "\n"
+           << "ADD R9, R9, " << kx << "\n"
+           << "MUL R9, R9, 4\n"
+           << "ADD R9, R9, " << weightBase << "\n"
+           << "LDG R11, [R9]\n"
+           << "FMA R20, R8, R11, R20\n";
+      }
+    }
+
+    os << "MUL R4, R1, " << (oh * ow) << "\n"
+       << "MUL R5, R2, " << ow << "\n"
+       << "ADD R4, R4, R5\n"
+       << "ADD R4, R4, R3\n"
+       << "MUL R4, R4, 4\n"
+       << "ADD R4, R4, " << outputBase << "\n"
+       << "STG [R4], R20\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitPoolingIsa(mgpu::LaunchOp launch, bool maxPool) {
+    SmallVector<Operation *> pools;
+    launch.getBody().front().walk([&](Operation *op) {
+      if (maxPool) {
+        if (isa<linalg::PoolingNchwMaxOp>(op))
+          pools.push_back(op);
+      } else if (isa<linalg::PoolingNchwSumOp>(op)) {
+        pools.push_back(op);
+      }
+    });
+    if (pools.empty())
+      return std::nullopt;
+
+    Operation *op = pools.front();
+    auto dstOp = cast<DestinationStyleOpInterface>(op);
+    if (dstOp.getDpsInputs().empty() || dstOp.getDpsInits().empty())
+      return std::nullopt;
+    auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!inputType || !outputType || inputType.getRank() != 4 ||
+        outputType.getRank() != 4)
+      return std::nullopt;
+
+    int64_t n = inputType.getShape()[0];
+    int64_t c = inputType.getShape()[1];
+    int64_t h = inputType.getShape()[2];
+    int64_t w = inputType.getShape()[3];
+    int64_t oh = outputType.getShape()[2];
+    int64_t ow = outputType.getShape()[3];
+    if (n != 1)
+      return std::nullopt;
+
+    int64_t kernelY = 2;
+    int64_t kernelX = 2;
+    int64_t strideY = 2;
+    int64_t strideX = 2;
+    int64_t total = c * oh * ow;
+    int64_t inputBase = 0;
+    int64_t outputBase = n * c * h * w * 4;
+    std::string arith = maxPool ? "MAX" : "ADD";
+    std::string identity = maxPool ? "-1.0e30" : "0";
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, total);
+    os << "IDIV R1, R0, " << (oh * ow) << "\n"
+       << "MUL R4, R1, " << (oh * ow) << "\n"
+       << "SUB R5, R0, R4\n"
+       << "IDIV R2, R5, " << ow << "\n"
+       << "MUL R6, R2, " << ow << "\n"
+       << "SUB R3, R5, R6\n"
+       << "MOV R20, " << identity << "\n";
+
+    for (int64_t ky = 0; ky < kernelY; ++ky) {
+      for (int64_t kx = 0; kx < kernelX; ++kx) {
+        os << "MOV R4, " << strideY << "\n"
+           << "MUL R4, R2, R4\n"
+           << "ADD R4, R4, " << ky << "\n"
+           << "MOV R5, " << strideX << "\n"
+           << "MUL R5, R3, R5\n"
+           << "ADD R5, R5, " << kx << "\n"
+           << "MOV R6, " << h << "\n"
+           << "MUL R6, R1, R6\n"
+           << "ADD R6, R6, R4\n"
+           << "MUL R6, R6, " << w << "\n"
+           << "ADD R6, R6, R5\n"
+           << "MUL R6, R6, 4\n"
+           << "ADD R6, R6, " << inputBase << "\n"
+           << "LDG R8, [R6]\n"
+           << arith << " R20, R20, R8\n";
+      }
+    }
+
+    if (!maxPool)
+      os << "DIV R20, R20, " << (kernelY * kernelX) << "\n";
+    os << "MUL R4, R1, " << (oh * ow) << "\n"
+       << "MUL R5, R2, " << ow << "\n"
+       << "ADD R4, R4, R5\n"
+       << "ADD R4, R4, R3\n"
+       << "MUL R4, R4, 4\n"
+       << "ADD R4, R4, " << outputBase << "\n"
+       << "STG [R4], R20\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitGlobalAvgPoolIsa(mgpu::LaunchOp launch) {
+    SmallVector<linalg::GenericOp> generics;
+    launch.getBody().front().walk(
+        [&](linalg::GenericOp generic) { generics.push_back(generic); });
+    for (linalg::GenericOp generic : generics) {
+      auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+      if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().empty())
+        continue;
+      auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+      auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+      if (!inputType || !outputType || inputType.getRank() != 4 ||
+          outputType.getRank() != 4 || outputType.getShape()[2] != 1 ||
+          outputType.getShape()[3] != 1)
+        continue;
+
+      bool hasAdd = false;
+      generic.getRegion().walk([&](arith::AddFOp) { hasAdd = true; });
+      if (!hasAdd)
+        continue;
+
+      int64_t c = inputType.getShape()[1];
+      int64_t h = inputType.getShape()[2];
+      int64_t w = inputType.getShape()[3];
+      int64_t total = c;
+      int64_t inputBase = 0;
+      int64_t outputBase = c * h * w * 4;
+
+      std::string code;
+      llvm::raw_string_ostream os(code);
+      emitCnnPrologue(os, total);
+      os << "MOV R1, R0\n"
+         << "MOV R20, 0\n";
+      for (int64_t ih = 0; ih < h; ++ih) {
+        for (int64_t iw = 0; iw < w; ++iw) {
+          os << "MOV R4, " << h << "\n"
+             << "MUL R4, R1, R4\n"
+             << "ADD R4, R4, " << ih << "\n"
+             << "MUL R4, R4, " << w << "\n"
+             << "ADD R4, R4, " << iw << "\n"
+             << "MUL R4, R4, 4\n"
+             << "ADD R4, R4, " << inputBase << "\n"
+             << "LDG R6, [R4]\n"
+             << "ADD R20, R20, R6\n";
+        }
+      }
+      os << "DIV R20, R20, " << (h * w) << "\n"
+         << "MUL R4, R1, 4\n"
+         << "ADD R4, R4, " << outputBase << "\n"
+         << "STG [R4], R20\n";
+      emitCnnFinish(os);
+      os.flush();
+
+      IsaText isa;
+      isa.code = code;
+      isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+      isa.block = "32x1x1";
       return isa;
     }
     return std::nullopt;

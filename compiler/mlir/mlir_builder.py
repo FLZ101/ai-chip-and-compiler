@@ -98,7 +98,7 @@ class MLIRBuilder:
     def _emit_function(self, graph: Graph, *, indent: str) -> list[str]:
         function_name = _sanitize_identifier(graph.name)
         args = ", ".join(
-            f"%arg{index}: {self._memref_type(value)}"
+            f"%arg{index}: {self._effective_input_type(graph, value)}"
             for index, value in enumerate(graph.inputs)
         )
         return_types = [self._memref_type(value) for value in graph.outputs]
@@ -133,6 +133,14 @@ class MLIRBuilder:
             lines.append(f"{body_indent}return")
         lines.append(f"{indent}}}")
         return lines
+
+    def _effective_input_type(self, graph: Graph, value: Value) -> str:
+        for node in graph.nodes:
+            if node.op == Op.DEPTHWISE_CONV2D and value.name == node.inputs[1].name:
+                return self._memref_type_for(
+                    (value.shape[0], value.shape[2], value.shape[3]), value.dtype
+                )
+        return self._memref_type(value)
 
     def _emit_node(self, node: Node, result_name: str, indent: str) -> list[str]:
         launch_suffix = result_name.lstrip("%")
@@ -487,15 +495,17 @@ class MLIRBuilder:
         strides = _pair(node.attrs.get("strides", 1), "strides")
         dilations = _pair(node.attrs.get("dilation", 1), "dilation")
         image_type = self._memref_type(image)
-        weight_type = self._memref_type(weight)
+        weight_type = self._memref_type_for(
+            (weight.shape[0], weight.shape[2], weight.shape[3]), output.dtype
+        )
         out_type = self._memref_type(output)
         return [
-            f"{indent}{result_name} = linalg.depthwise_conv_2d_nchw_chw",
-            f"{indent}  dilations = {_dense_i64_2(dilations)}",
+            f"{indent}linalg.depthwise_conv_2d_nchw_chw {{",
+            f"{indent}  dilations = {_dense_i64_2(dilations)},",
             f"{indent}  strides = {_dense_i64_2(strides)}",
-            f"{indent}  ins({self._value_names[image.name]}, "
+            f"{indent}}} ins({self._value_names[image.name]}, "
             f"{self._value_names[weight.name]} : {image_type}, {weight_type}) "
-            f"outs({result_name} : {out_type}) -> {out_type}",
+            f"outs({result_name} : {out_type})",
         ]
 
     def _emit_pooling(self, node: Node, result_name: str, indent: str) -> list[str]:

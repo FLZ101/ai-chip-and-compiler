@@ -173,6 +173,150 @@ class TestMgpuOptPipelineEndToEnd(unittest.TestCase):
             with self.subTest(op=op_name):
                 self._run_activation_via_mgpu_opt(op_name, 16)
 
+    @staticmethod
+    def _conv2d_reference(image, weight):
+        n, c, h, w = image.shape
+        f, _, kh, kw = weight.shape
+        out_h = h - kh + 1
+        out_w = w - kw + 1
+        output = np.zeros((n, f, out_h, out_w), dtype=np.float32)
+        for ff in range(f):
+            for oy in range(out_h):
+                for ox in range(out_w):
+                    acc = 0.0
+                    for cc in range(c):
+                        for ky in range(kh):
+                            for kx in range(kw):
+                                acc += (
+                                    image[0, cc, oy + ky, ox + kx]
+                                    * weight[ff, cc, ky, kx]
+                                )
+                    output[0, ff, oy, ox] = acc
+        return output
+
+    @staticmethod
+    def _depthwise_reference(image, weight):
+        n, c, h, w = image.shape
+        _, _, kh, kw = weight.shape
+        out_h = h - kh + 1
+        out_w = w - kw + 1
+        output = np.zeros((n, c, out_h, out_w), dtype=np.float32)
+        for cc in range(c):
+            for oy in range(out_h):
+                for ox in range(out_w):
+                    acc = 0.0
+                    for ky in range(kh):
+                        for kx in range(kw):
+                            acc += (
+                                image[0, cc, oy + ky, ox + kx] * weight[cc, 0, ky, kx]
+                            )
+                    output[0, cc, oy, ox] = acc
+        return output
+
+    def test_conv2d_uses_mgpu_opt(self):
+        rng = np.random.default_rng(21)
+        image = rng.normal(size=(1, 2, 4, 4)).astype(np.float32)
+        weight = rng.normal(size=(2, 2, 2, 2)).astype(np.float32)
+        frontend = ManualFrontend("conv2d")
+        x = frontend.add_input("x", DType.F32, image.shape)
+        w = frontend.add_input("w", DType.F32, weight.shape)
+        frontend.output(frontend.conv2d(x, w))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, image.reshape(-1).tolist())
+        device.global_memory.load_floats(image.nbytes, weight.reshape(-1).tolist())
+        device.global_memory.load_floats(image.nbytes + weight.nbytes, [0.0] * 18)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(image.nbytes + weight.nbytes, 18),
+            dtype=np.float32,
+        ).reshape(1, 2, 3, 3)
+        np.testing.assert_allclose(
+            actual, self._conv2d_reference(image, weight), rtol=1e-4, atol=1e-5
+        )
+
+    def test_depthwise_conv2d_uses_mgpu_opt(self):
+        rng = np.random.default_rng(22)
+        image = rng.normal(size=(1, 2, 4, 4)).astype(np.float32)
+        weight = rng.normal(size=(2, 1, 2, 2)).astype(np.float32)
+        frontend = ManualFrontend("depthwise")
+        x = frontend.add_input("x", DType.F32, image.shape)
+        w = frontend.add_input("w", DType.F32, weight.shape)
+        frontend.output(frontend.depthwise_conv2d(x, w))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, image.reshape(-1).tolist())
+        weight_base = image.nbytes
+        device.global_memory.load_floats(weight_base, weight.reshape(-1).tolist())
+        output_base = weight_base + weight.nbytes
+        device.global_memory.load_floats(output_base, [0.0] * 18)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(output_base, 18), dtype=np.float32
+        ).reshape(1, 2, 3, 3)
+        np.testing.assert_allclose(
+            actual,
+            self._depthwise_reference(image, weight),
+            rtol=1e-4,
+            atol=1e-5,
+        )
+
+    def _run_pool_via_mgpu_opt(self, op_name):
+        image = np.arange(1 * 2 * 4 * 4, dtype=np.float32).reshape(1, 2, 4, 4)
+        frontend = ManualFrontend(op_name)
+        x = frontend.add_input("x", DType.F32, image.shape)
+        if op_name == "max_pool":
+            output = frontend.max_pool2d(x, kernel=2, strides=2)
+        else:
+            output = frontend.avg_pool2d(x, kernel=2, strides=2)
+        frontend.output(output)
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, image.reshape(-1).tolist())
+        device.global_memory.load_floats(image.nbytes, [0.0] * 8)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(image.nbytes, 8), dtype=np.float32
+        ).reshape(1, 2, 2, 2)
+        if op_name == "max_pool":
+            expected = image.reshape(1, 2, 2, 2, 2, 2).max(axis=(3, 5))
+        else:
+            expected = image.reshape(1, 2, 2, 2, 2, 2).mean(axis=(3, 5))
+        np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
+    def test_pooling_uses_mgpu_opt(self):
+        for op_name in ("max_pool", "avg_pool"):
+            with self.subTest(op=op_name):
+                self._run_pool_via_mgpu_opt(op_name)
+
+    def test_global_avg_pool_uses_mgpu_opt(self):
+        image = np.arange(1 * 2 * 3 * 3, dtype=np.float32).reshape(1, 2, 3, 3)
+        frontend = ManualFrontend("gap")
+        x = frontend.add_input("x", DType.F32, image.shape)
+        frontend.output(frontend.global_avg_pool(x))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, image.reshape(-1).tolist())
+        device.global_memory.load_floats(image.nbytes, [0.0] * 2)
+        launch(
+            device, parse_asm(result.code), grid_dim=result.grid, block_dim=result.block
+        )
+        actual = np.asarray(
+            device.global_memory.read_floats(image.nbytes, 2), dtype=np.float32
+        ).reshape(1, 2, 1, 1)
+        expected = image.mean(axis=(2, 3), keepdims=True)
+        np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
 
 if __name__ == "__main__":
     unittest.main()
