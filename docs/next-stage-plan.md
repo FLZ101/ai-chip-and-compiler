@@ -5,6 +5,9 @@ This document defines the next major stage after the Python simulator MVP.
 Detailed ordered engineering steps are in
 [next-stage-steps.md](next-stage-steps.md).
 
+The C++ ISA backend migration plan is in
+[cpp-isa-backend-plan.md](cpp-isa-backend-plan.md).
+
 The goal is to replace the handwritten `Model IR -> ISA` lowerings with a real
 MLIR pass pipeline and to make the hardware/compiler stack capable of lowering
 real exported PyTorch and ONNX models to simulator ISA.
