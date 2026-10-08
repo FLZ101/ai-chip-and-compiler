@@ -92,6 +92,7 @@ class TestAttentionKernels(unittest.TestCase):
             atol=1e-5,
         )
         self.assertIn("EXP2", result.isa_text)
+        self.assertIn("MMA", result.isa_text)
 
     def test_masked_attention(self):
         q = np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)
@@ -115,6 +116,7 @@ class TestAttentionKernels(unittest.TestCase):
             atol=1e-5,
         )
         self.assertIn("EXP2", result.isa_text)
+        self.assertIn("MMA", result.isa_text)
 
     def test_kv_cache_append(self):
         cache = np.zeros((1, 1, 2, 2), dtype=np.float32)

@@ -58,6 +58,27 @@ def _launch_1d(n: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
     return (grid_x,), (block_size,)
 
 
+def _prologue_suffix(n: int, suffix: str) -> list[str]:
+    return [
+        "MOV R0, ctaid.x",
+        "MUL R0, R0, ntid.x",
+        "ADD R0, R0, tid.x",
+        f"MOV R1, {n}",
+        "CMP.LT R2, R0, R1",
+        f"BRA body_{suffix}, R2, end_{suffix}",
+        f"BRA end_{suffix}",
+        f"body_{suffix}:",
+    ]
+
+
+def _finish_suffix(suffix: str) -> list[str]:
+    return [f"BRA end_{suffix}", f"end_{suffix}:", "EXIT"]
+
+
+def _end_phase_suffix(suffix: str) -> list[str]:
+    return [f"BRA end_{suffix}", f"end_{suffix}:"]
+
+
 def _causal_mask_isa(
     node: Any, layout: dict[str, Any]
 ) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
@@ -210,6 +231,397 @@ def _kv_cache_gather_isa(
     return "\n".join(lines) + "\n", _launch_1d(total)
 
 
+def _mma_lane_index() -> list[str]:
+    return [
+        "IDIV R24, tid.x, 4",
+        "MUL R25, R24, 4",
+        "SUB R25, tid.x, R25",
+    ]
+
+
+def _attention_mma_isa(
+    q: Any,
+    k: Any,
+    v: Any,
+    mask: Any | None,
+    output: Any,
+    *,
+    seq: int,
+    dim: int,
+    scale: float,
+    masked: bool,
+) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
+    """Lower attention to two padded 16x16 MMA operations.
+
+    Phase 1 computes ``scores = Q @ K^T`` and writes the padded score tile to
+    shared memory.  Phase 2 computes softmax along each query row and writes the
+    normalized weights back to the same shared tile.  Phase 3 computes
+    ``output = softmax(scores) @ V`` and copies the valid output rows/columns to
+    global memory.
+    """
+    lines = _mma_lane_index()
+
+    # ---------- Q @ K^T ----------
+    for register in range(16, 24):
+        lines.append(f"MOV R{register}, 0")
+    for slot in range(8):
+        row_group = slot // 4
+        col_group = slot % 4
+        lines.extend(
+            _attention_q_fragment(
+                slot,
+                row_group=row_group,
+                col_group=col_group,
+                q=q,
+                seq=seq,
+                dim=dim,
+            )
+        )
+        lines.extend(
+            _attention_k_transpose_fragment(
+                8 + slot,
+                row_group=row_group,
+                col_group=col_group,
+                k=k,
+                seq=seq,
+                dim=dim,
+            )
+        )
+    lines.append("MMA R16, R0, R8, R16")
+    for slot in range(8):
+        row_group = slot // 4
+        col_group = slot % 4
+        lines.extend(
+            _store_fragment_to_shared(
+                16 + slot, row_group=row_group, col_group=col_group, offset=0
+            )
+        )
+    lines.append("BAR.SYNC")
+
+    # ---------- row-wise softmax ----------
+    lines.extend(_prologue_suffix(seq, "softmax"))
+    lines.extend(
+        _attention_softmax_lines(
+            seq=seq, scale=scale, mask=mask, masked=masked, offset=0
+        )
+    )
+    lines.extend(_end_phase_suffix("softmax"))
+    lines.append("BAR.SYNC")
+
+    # ---------- softmax(scores) @ V ----------
+    for register in range(16, 24):
+        lines.append(f"MOV R{register}, 0")
+    for slot in range(8):
+        row_group = slot // 4
+        col_group = slot % 4
+        lines.extend(
+            _attention_shared_a_fragment(
+                slot,
+                row_group=row_group,
+                col_group=col_group,
+                seq=seq,
+                offset=0,
+            )
+        )
+        lines.extend(
+            _attention_v_fragment(
+                8 + slot,
+                row_group=row_group,
+                col_group=col_group,
+                v=v,
+                seq=seq,
+                dim=dim,
+            )
+        )
+    lines.append("MMA R16, R0, R8, R16")
+    for slot in range(8):
+        row_group = slot // 4
+        col_group = slot % 4
+        lines.extend(
+            _store_fragment_to_shared(
+                16 + slot,
+                row_group=row_group,
+                col_group=col_group,
+                offset=16 * 16 * 4,
+            )
+        )
+    lines.append("BAR.SYNC")
+
+    # ---------- copy valid output tile ----------
+    lines.extend(_prologue_suffix(seq * dim, "copy"))
+    lines.extend(
+        [
+            f"IDIV R1, R0, {dim}",
+            f"MUL R2, R1, {dim}",
+            "SUB R3, R0, R2",
+            "MUL R4, R1, 16",
+            "ADD R4, R4, R3",
+            "MUL R4, R4, 4",
+            f"ADD R4, R4, {16 * 16 * 4}",
+            "LDS R5, [R4]",
+            f"MUL R4, R1, {dim}",
+            "ADD R4, R4, R3",
+            "MUL R4, R4, 4",
+            f"MOV R6, {output.base_addr}",
+            "ADD R4, R4, R6",
+            "STG [R4], R5",
+        ]
+    )
+    lines.extend(_finish_suffix("copy"))
+
+    return "\n".join(lines) + "\n", ((1,), (32,))
+
+
+def _attention_q_fragment(
+    dest: int,
+    *,
+    row_group: int,
+    col_group: int,
+    q: Any,
+    seq: int,
+    dim: int,
+) -> list[str]:
+    return [
+        f"MOV R26, {row_group * 8}",
+        "ADD R26, R26, R24",
+        f"MOV R27, {col_group * 4}",
+        "ADD R27, R27, R25",
+        f"MOV R39, {seq}",
+        "CMP.LT R28, R26, R39",
+        f"MOV R39, {dim}",
+        "CMP.LT R40, R27, R39",
+        "MUL R28, R28, R40",
+        f"MOV R39, {seq - 1}",
+        "MIN R29, R26, R39",
+        f"MOV R39, {dim - 1}",
+        "MIN R30, R27, R39",
+        f"MOV R37, {dim}",
+        "MUL R37, R29, R37",
+        "ADD R37, R37, R30",
+        "MUL R37, R37, 4",
+        f"ADD R37, R37, {q.base_addr}",
+        "LDG R42, [R37]",
+        "MOV R39, 0",
+        f"SEL R{dest}, R28, R42, R39",
+    ]
+
+
+def _attention_k_transpose_fragment(
+    dest: int,
+    *,
+    row_group: int,
+    col_group: int,
+    k: Any,
+    seq: int,
+    dim: int,
+) -> list[str]:
+    # B[row=d, col=j] = K[j, d].
+    return [
+        f"MOV R26, {row_group * 8}",
+        "ADD R26, R26, R24",
+        f"MOV R27, {col_group * 4}",
+        "ADD R27, R27, R25",
+        f"MOV R39, {dim}",
+        "CMP.LT R28, R26, R39",
+        f"MOV R39, {seq}",
+        "CMP.LT R40, R27, R39",
+        "MUL R28, R28, R40",
+        f"MOV R39, {dim - 1}",
+        "MIN R29, R26, R39",
+        f"MOV R39, {seq - 1}",
+        "MIN R30, R27, R39",
+        f"MOV R37, {dim}",
+        "MUL R37, R30, R37",
+        "ADD R37, R37, R29",
+        "MUL R37, R37, 4",
+        f"ADD R37, R37, {k.base_addr}",
+        "LDG R42, [R37]",
+        "MOV R39, 0",
+        f"SEL R{dest}, R28, R42, R39",
+    ]
+
+
+def _attention_shared_a_fragment(
+    dest: int,
+    *,
+    row_group: int,
+    col_group: int,
+    seq: int,
+    offset: int,
+) -> list[str]:
+    # Shared weights are already padded to 16x16, so no bounds checks are
+    # needed when loading the A fragment for the second MMA.
+    return [
+        f"MOV R26, {row_group * 8}",
+        "ADD R26, R26, R24",
+        f"MOV R27, {col_group * 4}",
+        "ADD R27, R27, R25",
+        "MUL R37, R26, 16",
+        "ADD R37, R37, R27",
+        "MUL R37, R37, 4",
+        f"ADD R37, R37, {offset}",
+        "LDS R42, [R37]",
+        f"MOV R{dest}, R42",
+    ]
+
+
+def _attention_v_fragment(
+    dest: int,
+    *,
+    row_group: int,
+    col_group: int,
+    v: Any,
+    seq: int,
+    dim: int,
+) -> list[str]:
+    # B[row=j, col=d] = V[j, d].
+    return [
+        f"MOV R26, {row_group * 8}",
+        "ADD R26, R26, R24",
+        f"MOV R27, {col_group * 4}",
+        "ADD R27, R27, R25",
+        f"MOV R39, {seq}",
+        "CMP.LT R28, R26, R39",
+        f"MOV R39, {dim}",
+        "CMP.LT R40, R27, R39",
+        "MUL R28, R28, R40",
+        f"MOV R39, {seq - 1}",
+        "MIN R29, R26, R39",
+        f"MOV R39, {dim - 1}",
+        "MIN R30, R27, R39",
+        f"MOV R37, {dim}",
+        "MUL R37, R29, R37",
+        "ADD R37, R37, R30",
+        "MUL R37, R37, 4",
+        f"ADD R37, R37, {v.base_addr}",
+        "LDG R42, [R37]",
+        "MOV R39, 0",
+        f"SEL R{dest}, R28, R42, R39",
+    ]
+
+
+def _store_fragment_to_shared(
+    source: int, *, row_group: int, col_group: int, offset: int
+) -> list[str]:
+    return [
+        f"MOV R26, {row_group * 8}",
+        "ADD R26, R26, R24",
+        f"MOV R27, {col_group * 4}",
+        "ADD R27, R27, R25",
+        "MUL R28, R26, 16",
+        "ADD R28, R28, R27",
+        "MUL R28, R28, 4",
+        f"ADD R28, R28, {offset}",
+        f"STS [R28], R{source}",
+    ]
+
+
+def _attention_softmax_lines(
+    *,
+    seq: int,
+    scale: float,
+    mask: Any | None,
+    masked: bool,
+    offset: int,
+) -> list[str]:
+    lines = ["MOV R3, -1000000000.0"]
+    for j in range(seq):
+        lines.extend(
+            _attention_read_score(
+                j, seq=seq, scale=scale, mask=mask, masked=masked, offset=offset
+            )
+        )
+        lines.append("MAX R3, R3, R2")
+
+    lines.append("MOV R4, 0")
+    for j in range(seq):
+        lines.extend(
+            _attention_read_score(
+                j, seq=seq, scale=scale, mask=mask, masked=masked, offset=offset
+            )
+        )
+        lines.extend(
+            [
+                "SUB R2, R2, R3",
+                "MUL R2, R2, 1.4426950408889634",
+                "EXP2 R5, R2",
+                "ADD R4, R4, R5",
+            ]
+        )
+
+    for j in range(seq):
+        lines.extend(
+            [
+                "MUL R1, R0, 16",
+                f"ADD R1, R1, {j}",
+                "MUL R1, R1, 4",
+                f"ADD R1, R1, {offset}",
+                "LDS R2, [R1]",
+                f"MUL R2, R2, {scale}",
+            ]
+        )
+        if masked:
+            lines.extend(
+                [
+                    f"MOV R6, {seq}",
+                    "MUL R6, R0, R6",
+                    f"ADD R6, R6, {j}",
+                    "MUL R6, R6, 4",
+                    f"MOV R7, {mask.base_addr}",
+                    "ADD R6, R6, R7",
+                    "LDG R8, [R6]",
+                    "CMP.EQ R6, R8, 0",
+                    "MOV R7, -1000000000.0",
+                    "SEL R2, R6, R7, R2",
+                ]
+            )
+        lines.extend(
+            [
+                "SUB R2, R2, R3",
+                "MUL R2, R2, 1.4426950408889634",
+                "EXP2 R5, R2",
+                "DIV R5, R5, R4",
+                "STS [R1], R5",
+            ]
+        )
+    return lines
+
+
+def _attention_read_score(
+    j: int,
+    *,
+    seq: int,
+    scale: float,
+    mask: Any | None,
+    masked: bool,
+    offset: int,
+) -> list[str]:
+    lines = [
+        "MUL R1, R0, 16",
+        f"ADD R1, R1, {j}",
+        "MUL R1, R1, 4",
+        f"ADD R1, R1, {offset}",
+        "LDS R2, [R1]",
+        f"MUL R2, R2, {scale}",
+    ]
+    if masked:
+        lines.extend(
+            [
+                f"MOV R6, {seq}",
+                "MUL R6, R0, R6",
+                f"ADD R6, R6, {j}",
+                "MUL R6, R6, 4",
+                f"MOV R7, {mask.base_addr}",
+                "ADD R6, R6, R7",
+                "LDG R8, [R6]",
+                "CMP.EQ R6, R8, 0",
+                "MOV R7, -1000000000.0",
+                "SEL R2, R6, R7, R2",
+            ]
+        )
+    return lines
+
+
 def _attention_isa(
     node: Any, layout: dict[str, Any], *, masked: bool
 ) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
@@ -223,9 +635,23 @@ def _attention_isa(
     if q.shape[0] != 1 or q.shape[1] != 1:
         raise NotImplementedError("attention lowering supports B=1,H=1")
     batch, heads, seq, dim = q.shape
+    scale = float(node.attrs.get("scale", 1.0 / math.sqrt(dim)))
+
+    if seq <= 16 and dim <= 16:
+        return _attention_mma_isa(
+            q,
+            k,
+            v,
+            mask,
+            output,
+            seq=seq,
+            dim=dim,
+            scale=scale,
+            masked=masked,
+        )
+
     if seq != 2 or dim != 2:
         raise NotImplementedError("attention lowering currently supports S=2,D=2")
-    scale = float(node.attrs.get("scale", 1.0 / math.sqrt(dim)))
 
     lines = _prologue(seq)
     lines.extend(["MOV R20, -1000000000.0", "MOV R21, 0"])

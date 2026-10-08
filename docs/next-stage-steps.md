@@ -447,6 +447,10 @@ Tests:
 
 ### 4.4 Lower conv and attention to MMA
 
+Status: **done**
+
+Reference: [step-4.4.md](step-4.4.md)
+
 Use im2col-style tiling for conv and attention.
 
 Tests:

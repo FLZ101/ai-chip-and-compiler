@@ -30,8 +30,9 @@ Current restrictions:
 - convolution padding is supported with branchless clamped loads,
 - pooling supports `padding=0`.
 
-The conv kernels use unrolled channel/kernel loops and `FMA`.  Shared-memory
-im2col + tiled matmul can be added later when larger models require it.
+The initial conv kernels use unrolled channel/kernel loops and `FMA`.  Phase
+4.4 adds an im2col-style MMA path for regular `Conv2d` when the spatial,
+reduction, and output-channel dimensions each fit the 16x16 tensor-core tile.
 
 ---
 

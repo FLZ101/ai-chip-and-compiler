@@ -55,7 +55,8 @@ Today `mgpu-opt` can:
 - run the `tile-linalg` pass to tile buffer-form linalg operations,
 - run the `map-to-mgpu` pass to map top-level loops to `mgpu.launch`,
 - run the `lower-to-mgpu` pass to insert shared memory/copy/barrier/mma ops,
-- run the `mgpu-to-isa` pass for supported vector-add and matmul launches,
+- run the `mgpu-to-isa` pass for supported vector-add, matmul, conv2d, and
+  `mgpu.attention` launches,
 - lower generic `mgpu.*` launches to ISA mappings or placeholders,
 - run upstream passes such as `one-shot-bufferize`.
 
@@ -76,6 +77,7 @@ The out-of-tree dialect currently supports:
 - `mgpu.barrier`
 - `mgpu.async_copy`
 - `mgpu.mma`
+- `mgpu.attention`
 - `mgpu.return`
 
 Dimension operands currently use `I32Attr` rather than symbolic enum attributes.
@@ -184,6 +186,5 @@ Expected result: the module parses and prints successfully.
 
 - No lowering passes yet except `tile-linalg` and `map-to-mgpu`.
 - Dimension attributes are numeric `I32Attr`, not symbolic `x`/`y`/`z`.
-- `mgpu.shared_alloc`, `mgpu.async_copy`, and `mgpu.mma` are defined but not
-  lowered or executed yet.
+- `mgpu.shared_alloc` and `mgpu.async_copy` are still generic placeholders.
 - Python still generates MLIR text; `mgpu-opt` is not yet called by the driver.

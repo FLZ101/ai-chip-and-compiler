@@ -108,6 +108,31 @@ def MGPU_MmaOp : MGPU_Op<"mma", [Pure]> {
   let results = (outs AnyMemRef:$result);
 }
 
+def MGPU_AttentionOp : MGPU_Op<"attention", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Warp-wide scaled dot-product attention target op";
+  let description = [{
+    ``mgpu.attention`` represents the complete attention computation:
+    ``softmax(Q @ K^T * scale) @ V``.
+
+    The ``mask`` operand is present even when ``masked`` is false; the lowering
+    ignores it in that case.  Keeping the operand explicit makes the target
+    instruction easier to use before mask materialization has been decided.
+  }];
+  let arguments = (ins AnyMemRef:$q,
+                       AnyMemRef:$k,
+                       AnyMemRef:$v,
+                       AnyMemRef:$mask,
+                       AnyMemRef:$output,
+                       F32Attr:$scale,
+                       UnitAttr:$masked);
+  let results = (outs);
+  let assemblyFormat = [{
+    $q `,` $k `,` $v `,` $mask `,` $output
+    attr-dict
+    `:` type($q) `,` type($k) `,` type($v) `,` type($mask) `,` type($output)
+  }];
+}
+
 def MGPU_QuantOp : MGPU_Op<"quant", [Pure]> {
   let summary = "Quantize a value using scale and zero point";
   let arguments = (ins AnyType:$input,

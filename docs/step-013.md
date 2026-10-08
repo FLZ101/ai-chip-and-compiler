@@ -27,13 +27,17 @@ The initial attention path supports small deterministic shapes:
 - KV-cache append: equal cache/value shapes,
 - KV-cache gather: `B=1`, `H=1`.
 
-Attention uses a stable three-pass form:
+The initial attention path uses a stable three-pass form:
 
 1. compute max score,
 2. sum `exp(score - max)`,
 3. accumulate output with softmax weights.
 
 Masked attention applies a `-inf` mask before softmax.
+
+Phase 4.4 adds an MMA path for `S <= 16`, `D <= 16` attention.  It computes
+`Q @ K^T` and `softmax(...) @ V` as two padded tensor-core MMA operations with
+a SIMT softmax phase between them.
 
 ---
 

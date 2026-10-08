@@ -56,6 +56,275 @@ def _launch_1d(n: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
     return (grid_x,), (block_size,)
 
 
+def _mma_lane_index() -> list[str]:
+    return [
+        "IDIV R24, tid.x, 4",
+        "MUL R25, R24, 4",
+        "SUB R25, tid.x, R25",
+    ]
+
+
+def _conv2d_mma_isa(
+    image: Any,
+    weight: Any,
+    output: Any,
+    bias: Any | None,
+    *,
+    c: int,
+    h: int,
+    w: int,
+    f: int,
+    kh: int,
+    kw: int,
+    oh: int,
+    ow: int,
+    stride: tuple[int, int],
+    padding: tuple[int, int],
+) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
+    """Lower one 2D conv to a padded 16x16x16 MMA.
+
+    The convolution is viewed as ``im2col(image) @ weight_matrix``.  A is the
+    im2col patch matrix with ``spatial_size`` rows and ``c*kh*kw`` reduction
+    columns.  B is the reshaped weight matrix with reduction rows and output
+    channels as columns.  Invalid rows/columns are masked to zero.
+    """
+    reduction_size = c * kh * kw
+    spatial_size = oh * ow
+    stride_y, stride_x = stride
+    pad_y, pad_x = padding
+
+    lines = _mma_lane_index()
+    for register in range(16, 24):
+        lines.append(f"MOV R{register}, 0")
+
+    for slot in range(8):
+        row_group = slot // 4
+        col_group = slot % 4
+        lines.extend(
+            _conv2d_a_fragment(
+                slot,
+                row_group=row_group,
+                col_group=col_group,
+                image=image,
+                c=c,
+                h=h,
+                w=w,
+                kh=kh,
+                kw=kw,
+                ow=ow,
+                spatial_size=spatial_size,
+                reduction_size=reduction_size,
+                stride_y=stride_y,
+                stride_x=stride_x,
+                pad_y=pad_y,
+                pad_x=pad_x,
+            )
+        )
+        lines.extend(
+            _conv2d_b_fragment(
+                8 + slot,
+                row_group=row_group,
+                col_group=col_group,
+                weight=weight,
+                c=c,
+                kh=kh,
+                kw=kw,
+                f=f,
+                reduction_size=reduction_size,
+            )
+        )
+
+    lines.append("MMA R16, R0, R8, R16")
+
+    for slot in range(8):
+        row_group = slot // 4
+        col_group = slot % 4
+        lines.extend(
+            _store_mma_fragment_to_shared(
+                16 + slot, row_group=row_group, col_group=col_group
+            )
+        )
+    lines.append("BAR.SYNC")
+
+    # One SIMT copy phase writes the valid padded C matrix to the real NCHW
+    # output.  The shared tile is padded to 16 columns; only spatial_size rows
+    # and f columns are real.
+    lines.extend(_prologue(spatial_size * f))
+    lines.extend(
+        [
+            f"IDIV R1, R0, {spatial_size}",
+            f"MUL R2, R1, {spatial_size}",
+            "SUB R3, R0, R2",
+            f"IDIV R4, R3, {ow}",
+            f"MUL R5, R4, {ow}",
+            "SUB R6, R3, R5",
+            "MUL R7, R3, 16",
+            "ADD R7, R7, R1",
+            "MUL R7, R7, 4",
+            "LDS R8, [R7]",
+        ]
+    )
+    if bias is not None:
+        lines.extend(
+            [
+                "MUL R9, R1, 4",
+                f"MOV R10, {bias.base_addr}",
+                "ADD R9, R9, R10",
+                "LDG R11, [R9]",
+                "ADD R8, R8, R11",
+            ]
+        )
+    lines.extend(
+        [
+            f"MUL R9, R1, {oh}",
+            "ADD R9, R9, R4",
+            f"MUL R9, R9, {ow}",
+            "ADD R9, R9, R6",
+            "MUL R9, R9, 4",
+            f"MOV R10, {output.base_addr}",
+            "ADD R9, R9, R10",
+            "STG [R9], R8",
+        ]
+    )
+    lines.extend(_finish())
+    return "\n".join(lines) + "\n", ((1,), (32,))
+
+
+def _conv2d_a_fragment(
+    dest: int,
+    *,
+    row_group: int,
+    col_group: int,
+    image: Any,
+    c: int,
+    h: int,
+    w: int,
+    kh: int,
+    kw: int,
+    ow: int,
+    spatial_size: int,
+    reduction_size: int,
+    stride_y: int,
+    stride_x: int,
+    pad_y: int,
+    pad_x: int,
+) -> list[str]:
+    area = kh * kw
+    return [
+        f"MOV R26, {row_group * 8}",
+        "ADD R26, R26, R24",
+        f"MOV R27, {col_group * 4}",
+        "ADD R27, R27, R25",
+        f"MOV R39, {spatial_size}",
+        "CMP.LT R28, R26, R39",
+        f"MOV R39, {reduction_size}",
+        "CMP.LT R40, R27, R39",
+        "MUL R28, R28, R40",
+        f"MOV R39, {spatial_size - 1}",
+        "MIN R29, R26, R39",
+        f"MOV R39, {reduction_size - 1}",
+        "MIN R30, R27, R39",
+        f"IDIV R31, R29, {ow}",
+        f"MUL R32, R31, {ow}",
+        "SUB R32, R29, R32",
+        f"IDIV R33, R30, {area}",
+        f"MUL R34, R33, {area}",
+        "SUB R34, R30, R34",
+        f"IDIV R35, R34, {kw}",
+        f"MUL R36, R35, {kw}",
+        "SUB R36, R34, R36",
+        f"MOV R37, {stride_y}",
+        "MUL R37, R31, R37",
+        "ADD R37, R37, R35",
+        f"SUB R37, R37, {pad_y}",
+        f"MOV R38, {stride_x}",
+        "MUL R38, R32, R38",
+        "ADD R38, R38, R36",
+        f"SUB R38, R38, {pad_x}",
+        "MOV R39, 0",
+        "MAX R37, R37, R39",
+        f"MOV R39, {h - 1}",
+        "MIN R37, R37, R39",
+        "MOV R39, 0",
+        "MAX R38, R38, R39",
+        f"MOV R39, {w - 1}",
+        "MIN R38, R38, R39",
+        f"MOV R41, {h}",
+        "MUL R41, R33, R41",
+        "ADD R41, R41, R37",
+        f"MUL R41, R41, {w}",
+        "ADD R41, R41, R38",
+        "MUL R41, R41, 4",
+        f"ADD R41, R41, {image.base_addr}",
+        "LDG R42, [R41]",
+        "MOV R39, 0",
+        f"SEL R{dest}, R28, R42, R39",
+    ]
+
+
+def _conv2d_b_fragment(
+    dest: int,
+    *,
+    row_group: int,
+    col_group: int,
+    weight: Any,
+    c: int,
+    kh: int,
+    kw: int,
+    f: int,
+    reduction_size: int,
+) -> list[str]:
+    area = kh * kw
+    return [
+        f"MOV R26, {row_group * 8}",
+        "ADD R26, R26, R24",
+        f"MOV R27, {col_group * 4}",
+        "ADD R27, R27, R25",
+        f"MOV R39, {reduction_size}",
+        "CMP.LT R28, R26, R39",
+        f"MOV R39, {f}",
+        "CMP.LT R40, R27, R39",
+        "MUL R28, R28, R40",
+        f"MOV R39, {reduction_size - 1}",
+        "MIN R29, R26, R39",
+        f"MOV R39, {f - 1}",
+        "MIN R30, R27, R39",
+        f"IDIV R33, R29, {area}",
+        f"MUL R34, R33, {area}",
+        "SUB R34, R29, R34",
+        f"IDIV R35, R34, {kw}",
+        f"MUL R36, R35, {kw}",
+        "SUB R36, R34, R36",
+        f"MOV R37, {c}",
+        "MUL R37, R30, R37",
+        "ADD R37, R37, R33",
+        f"MUL R37, R37, {kh}",
+        "ADD R37, R37, R35",
+        f"MUL R37, R37, {kw}",
+        "ADD R37, R37, R36",
+        "MUL R37, R37, 4",
+        f"ADD R37, R37, {weight.base_addr}",
+        "LDG R42, [R37]",
+        "MOV R39, 0",
+        f"SEL R{dest}, R28, R42, R39",
+    ]
+
+
+def _store_mma_fragment_to_shared(
+    source: int, *, row_group: int, col_group: int
+) -> list[str]:
+    return [
+        f"MOV R26, {row_group * 8}",
+        "ADD R26, R26, R24",
+        f"MOV R27, {col_group * 4}",
+        "ADD R27, R27, R25",
+        "MUL R28, R26, 16",
+        "ADD R28, R28, R27",
+        "MUL R28, R28, 4",
+        f"STS [R28], R{source}",
+    ]
+
+
 def _conv2d_isa(
     node: Any, layout: dict[str, Any]
 ) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
@@ -83,6 +352,26 @@ def _conv2d_isa(
     stride = _pair(node.attrs.get("strides", 1), "strides")
     padding = _pair(node.attrs.get("padding", 0), "padding")
     out_num = f * oh * ow
+
+    reduction_size = c * kh * kw
+    spatial_size = oh * ow
+    if f <= 16 and reduction_size <= 16 and spatial_size <= 16:
+        return _conv2d_mma_isa(
+            image,
+            weight,
+            output,
+            bias,
+            c=c,
+            h=h,
+            w=w,
+            f=f,
+            kh=kh,
+            kw=kw,
+            oh=oh,
+            ow=ow,
+            stride=stride,
+            padding=padding,
+        )
 
     lines = _prologue(out_num)
     lines.extend(

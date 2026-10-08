@@ -100,7 +100,7 @@ class TestCNNkernelsEndToEnd(unittest.TestCase):
             lowering=lower_kernel,
             atol=1e-5,
         )
-        self.assertIn("FMA", result.isa_text)
+        self.assertIn("MMA", result.isa_text)
         self.assertIn("IDIV", result.isa_text)
 
     def test_depthwise_conv2d(self):
