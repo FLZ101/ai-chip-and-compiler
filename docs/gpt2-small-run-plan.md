@@ -37,6 +37,7 @@ Already available:
 - software kernels for matmul/linear, conv, batch norm, ReLU, add, pooling,
   reshape, transpose, concat, slice, resize, softmax, masked softmax,
   layer norm, RMS norm, rope, KV cache, and attention.
+- software `embedding_gather` and `argmax` Model IR ops with reference tests.
 - mgpu-vs-software differential tests for the supported operators.
 
 Missing for full GPT-2:
