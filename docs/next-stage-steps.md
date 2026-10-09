@@ -602,8 +602,17 @@ Tests: `tests/model_e2e/test_real_kv_cache.py`
 
 ### 6.5 Autoregressive loop
 
+Status: **done**
+
 - run several decode steps,
 - compare outputs.
+
+The PyTorch FX frontend now handles multi-output graphs and can export a
+two-step loop built from repeated ``kv_cache_gather`` calls.  The simulator
+produces both decode-step outputs and they are compared against the NumPy
+autoregressive-loop reference.
+
+Tests: `tests/model_e2e/test_real_autoregressive.py`
 
 ### 6.6 Real CNN target
 

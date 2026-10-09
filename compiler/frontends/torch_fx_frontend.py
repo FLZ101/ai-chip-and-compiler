@@ -56,7 +56,13 @@ class TorchFXFrontend:
             elif node.op == "call_method":
                 values[node.name] = self._convert_call_method(frontend, node, values)
             elif node.op == "output":
-                outputs = [self._resolve_arg(arg, values) for arg in node.args]
+                outputs: list[object] = []
+                for arg in node.args:
+                    resolved = self._resolve_arg(arg, values)
+                    if isinstance(resolved, tuple):
+                        outputs.extend(resolved)
+                    else:
+                        outputs.append(resolved)
                 frontend.output(*outputs)
             else:
                 raise TorchFXFrontendError(f"unsupported FX node op: {node.op}")
