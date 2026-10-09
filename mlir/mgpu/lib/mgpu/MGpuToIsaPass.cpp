@@ -3212,6 +3212,12 @@ struct MGpuToIsaPass
        << endLabel << ":\n";
   }
 
+  static void emitMmaAccumulate(llvm::raw_ostream &os, int dstBase,
+                                int aBase, int bBase, int cBase) {
+    os << "MMA R" << dstBase << ", R" << aBase << ", R" << bBase << ", R"
+       << cBase << "\n";
+  }
+
   static void emitStoreSharedFragment(llvm::raw_ostream &os, int source,
                                       int rowGroup, int colGroup,
                                       int64_t offset) {
