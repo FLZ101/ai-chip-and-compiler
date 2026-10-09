@@ -199,6 +199,13 @@ struct MGpuToIsaPass
           "Emit only the tiled attention score stage for rank-4 attention"),
       llvm::cl::init(false)};
 
+  Option<bool> emitAttentionSoftmaxStage{
+      *this, "emit-attention-softmax",
+      llvm::cl::desc(
+          "Emit the tiled attention score and softmax stages for rank-4 "
+          "attention"),
+      llvm::cl::init(false)};
+
   void runOnOperation() override {
     bufferMap = BufferMap::build(getOperation());
     SmallVector<mgpu::LaunchOp> launches;
@@ -4183,7 +4190,19 @@ struct MGpuToIsaPass
     }
   }
 
-  std::optional<IsaText> emitTiledAttentionScoreIsa(mgpu::AttentionOp attention) {
+  struct TiledAttentionShape {
+    int64_t seq = 0;
+    int64_t dim = 0;
+    int64_t qTiles = 0;
+    int64_t kTiles = 0;
+    int64_t dTiles = 0;
+    int64_t qBase = 0;
+    int64_t kBase = 0;
+    int64_t maskBase = 0;
+  };
+
+  std::optional<TiledAttentionShape>
+  getTiledAttentionShape(mgpu::AttentionOp attention) const {
     auto qType = dyn_cast<MemRefType>(attention.getQ().getType());
     auto kType = dyn_cast<MemRefType>(attention.getK().getType());
     if (!qType || !kType || qType.getRank() != 4 || kType.getRank() != 4)
@@ -4200,25 +4219,32 @@ struct MGpuToIsaPass
     if (seq <= 0 || dim <= 0)
       return std::nullopt;
 
-    int64_t qTiles = (seq + 15) / 16;
-    int64_t kTiles = (seq + 15) / 16;
-    int64_t dTiles = (dim + 15) / 16;
-    int64_t qBase = bufferMap.base(attention.getQ());
-    int64_t kBase = bufferMap.base(attention.getK());
+    TiledAttentionShape shape;
+    shape.seq = seq;
+    shape.dim = dim;
+    shape.qTiles = (seq + 15) / 16;
+    shape.kTiles = (seq + 15) / 16;
+    shape.dTiles = (dim + 15) / 16;
+    shape.qBase = bufferMap.base(attention.getQ());
+    shape.kBase = bufferMap.base(attention.getK());
+    shape.maskBase = bufferMap.base(attention.getMask());
+    return shape;
+  }
 
-    std::string code;
-    llvm::raw_string_ostream os(code);
+  void emitTiledAttentionScoreBody(llvm::raw_ostream &os,
+                                   const TiledAttentionShape &shape) {
     emitLaneIndex(os);
-    emitQueryTileLoopStart(os, qTiles, "query_tile_end");
-    emitKeyTileLoopStart(os, kTiles, "key_tile_end");
+    emitQueryTileLoopStart(os, shape.qTiles, "query_tile_end");
+    emitKeyTileLoopStart(os, shape.kTiles, "key_tile_end");
     emitZeroTile(os, 16);
-    emitDimTileLoopStart(os, dTiles, "dim_tile_end");
+    emitDimTileLoopStart(os, shape.dTiles, "dim_tile_end");
 
     for (int slot = 0; slot < 8; ++slot) {
-      emitAttentionQFragmentTiled(os, slot, slot / 4, slot % 4, qBase, seq,
-                                  dim, 40, 46);
+      emitAttentionQFragmentTiled(os, slot, slot / 4, slot % 4, shape.qBase,
+                                  shape.seq, shape.dim, 40, 46);
       emitAttentionKTransposeFragmentTiled(os, 8 + slot, slot / 4, slot % 4,
-                                           kBase, seq, dim, 46, 43);
+                                           shape.kBase, shape.seq, shape.dim,
+                                           46, 43);
     }
 
     emitMmaAccumulate(os, 16, 0, 8, 16);
@@ -4227,7 +4253,7 @@ struct MGpuToIsaPass
     // Compute the byte offset of the current (query,key) score tile in the
     // shared-memory tile array: (q * kTiles + k) * 16 * 16 * 4.
     os << "MOV R48, R40\n"
-       << "MUL R48, R48, " << kTiles << "\n"
+       << "MUL R48, R48, " << shape.kTiles << "\n"
        << "ADD R48, R48, R43\n"
        << "MUL R48, R48, 1024\n";
     emitStoreFullTileReg(os, 16, 48, 0);
@@ -4235,6 +4261,138 @@ struct MGpuToIsaPass
 
     emitKeyTileLoopEnd(os, "key_tile_end");
     emitQueryTileLoopEnd(os, "query_tile_end");
+  }
+
+  static void emitTiledSoftmaxScoreRead(llvm::raw_ostream &os, int qTileReg,
+                                        int qLocalReg, int keyReg, int rowReg,
+                                        int destReg, int64_t kTiles,
+                                        int64_t seq, double scale,
+                                        int64_t maskBase, bool masked) {
+    // kTile = key / 16, kLocal = key % 16.
+    os << "MOV R7, R" << keyReg << "\n"
+       << "IDIV R7, R7, 16\n"
+       << "MOV R8, R7\n"
+       << "MUL R8, R8, 16\n"
+       << "SUB R8, R" << keyReg << ", R8\n"
+       << "MOV R9, R" << qTileReg << "\n"
+       << "MUL R9, R9, " << kTiles << "\n"
+       << "ADD R9, R9, R7\n"
+       << "MUL R9, R9, 1024\n"
+       << "MOV R10, R" << qLocalReg << "\n"
+       << "MUL R10, R10, 16\n"
+       << "ADD R10, R10, R8\n"
+       << "MUL R10, R10, 4\n"
+       << "ADD R10, R10, R9\n"
+       << "LDS R" << destReg << ", [R10]\n"
+       << "MUL R" << destReg << ", R" << destReg << ", " << scale << "\n";
+    if (masked) {
+      os << "MOV R12, R" << rowReg << "\n"
+         << "MUL R12, R12, " << seq << "\n"
+         << "ADD R12, R12, R" << keyReg << "\n"
+         << "MUL R12, R12, 4\n"
+         << "ADD R12, R12, " << maskBase << "\n"
+         << "LDG R13, [R12]\n"
+         << "CMP.EQ R14, R13, 0\n"
+         << "MOV R15, -1.0e30\n"
+         << "SEL R" << destReg << ", R14, R15, R" << destReg << "\n";
+    }
+  }
+
+  void emitTiledAttentionSoftmaxBody(llvm::raw_ostream &os,
+                                     const TiledAttentionShape &shape,
+                                     double scale, bool masked) {
+    os << "MOV R0, tid.x\n"
+       << "softmax_row_loop:\n"
+       << "CMP.LT R1, R0, " << shape.seq << "\n"
+       << "BRA softmax_row_body, R1, softmax_row_end\n"
+       << "BRA softmax_row_end\n"
+       << "softmax_row_body:\n"
+       << "MOV R2, R0\n"
+       << "IDIV R2, R2, 16\n"
+       << "MOV R3, R2\n"
+       << "MUL R3, R3, 16\n"
+       << "SUB R3, R0, R3\n"
+       << "MOV R4, -1.0e30\n"
+       << "MOV R5, 0\n"
+       << "softmax_max_loop:\n"
+       << "CMP.LT R6, R5, " << shape.seq << "\n"
+       << "BRA softmax_max_body, R6, softmax_max_end\n"
+       << "BRA softmax_max_end\n"
+       << "softmax_max_body:\n";
+    emitTiledSoftmaxScoreRead(os, 2, 3, 5, 0, 11, shape.kTiles, shape.seq,
+                              scale, shape.maskBase, masked);
+    os << "MAX R4, R4, R11\n"
+       << "ADD R5, R5, 1\n"
+       << "BRA softmax_max_loop\n"
+       << "softmax_max_end:\n"
+       << "MOV R5, 0\n"
+       << "MOV R16, 0\n"
+       << "softmax_sum_loop:\n"
+       << "CMP.LT R6, R5, " << shape.seq << "\n"
+       << "BRA softmax_sum_body, R6, softmax_sum_end\n"
+       << "BRA softmax_sum_end\n"
+       << "softmax_sum_body:\n";
+    emitTiledSoftmaxScoreRead(os, 2, 3, 5, 0, 11, shape.kTiles, shape.seq,
+                              scale, shape.maskBase, masked);
+    os << "SUB R11, R11, R4\n"
+       << "MUL R11, R11, 1.4426950408889634\n"
+       << "EXP2 R11, R11\n"
+       << "ADD R16, R16, R11\n"
+       << "ADD R5, R5, 1\n"
+       << "BRA softmax_sum_loop\n"
+       << "softmax_sum_end:\n"
+       << "MOV R5, 0\n"
+       << "softmax_store_loop:\n"
+       << "CMP.LT R6, R5, " << shape.seq << "\n"
+       << "BRA softmax_store_body, R6, softmax_store_end\n"
+       << "BRA softmax_store_end\n"
+       << "softmax_store_body:\n";
+    emitTiledSoftmaxScoreRead(os, 2, 3, 5, 0, 11, shape.kTiles, shape.seq,
+                              scale, shape.maskBase, masked);
+    os << "SUB R11, R11, R4\n"
+       << "MUL R11, R11, 1.4426950408889634\n"
+       << "EXP2 R11, R11\n"
+       << "DIV R11, R11, R16\n"
+       << "STS [R10], R11\n"
+       << "ADD R5, R5, 1\n"
+       << "BRA softmax_store_loop\n"
+       << "softmax_store_end:\n"
+       << "ADD R0, R0, 32\n"
+       << "BRA softmax_row_loop\n"
+       << "softmax_row_end:\n"
+       << "BAR.SYNC\n";
+  }
+
+  std::optional<IsaText> emitTiledAttentionScoreIsa(mgpu::AttentionOp attention) {
+    auto shape = getTiledAttentionShape(attention);
+    if (!shape)
+      return std::nullopt;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitTiledAttentionScoreBody(os, *shape);
+    os << "EXIT\n";
+    os.flush();
+
+    IsaText result;
+    result.code = code;
+    result.grid = "1x1x1";
+    result.block = "32x1x1";
+    return result;
+  }
+
+  std::optional<IsaText>
+  emitTiledAttentionSoftmaxIsa(mgpu::AttentionOp attention) {
+    auto shape = getTiledAttentionShape(attention);
+    if (!shape)
+      return std::nullopt;
+
+    double scale = attention.getScale().convertToDouble();
+    bool masked = attention.getMasked();
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitTiledAttentionScoreBody(os, *shape);
+    emitTiledAttentionSoftmaxBody(os, *shape, scale, masked);
     os << "EXIT\n";
     os.flush();
 
@@ -4461,6 +4619,10 @@ struct MGpuToIsaPass
       return std::nullopt;
     if (qType.getRank() == 4 && kType.getRank() == 4 &&
         vType.getRank() == 4 && outputType.getRank() == 4) {
+      if (emitAttentionSoftmaxStage) {
+        if (auto softmaxIsa = emitTiledAttentionSoftmaxIsa(attention))
+          return softmaxIsa;
+      }
       if (emitAttentionScore) {
         if (auto scoreIsa = emitTiledAttentionScoreIsa(attention))
           return scoreIsa;
