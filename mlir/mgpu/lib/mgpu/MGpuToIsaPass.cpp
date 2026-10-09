@@ -1192,6 +1192,82 @@ struct MGpuToIsaPass
   }
 
   std::optional<IsaText>
+  emitFloatScaleLinalgIsa(mgpu::LaunchOp launch, linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!inputType || !outputType || !inputType.getElementType().isF32() ||
+        !outputType.getElementType().isF32())
+      return std::nullopt;
+
+    Value inputBlockArg = generic.getRegion().front().getArgument(0);
+    double scale = 0.0;
+    bool found = false;
+    generic.getRegion().walk([&](Operation *op) {
+      if (auto mulOp = dyn_cast<arith::MulFOp>(op)) {
+        Value other = mulOp.getLhs() == inputBlockArg ? mulOp.getRhs()
+                                                       : mulOp.getLhs();
+        if (other == inputBlockArg)
+          return;
+        auto truncOp = other.getDefiningOp<arith::TruncFOp>();
+        if (!truncOp)
+          return;
+        auto constantOp = truncOp.getIn().getDefiningOp<arith::ConstantOp>();
+        if (!constantOp)
+          return;
+        auto floatAttr = dyn_cast<FloatAttr>(constantOp.getValue());
+        if (!floatAttr)
+          return;
+        scale = static_cast<float>(floatAttr.getValueAsDouble());
+        found = true;
+      }
+    });
+    if (!found)
+      return std::nullopt;
+
+    auto inputOffset = bufferMap.lookup(dstOp.getDpsInputs()[0]);
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!inputOffset || !outputOffset)
+      return std::nullopt;
+
+    int64_t n = 1;
+    for (int64_t dim : outputType.getShape())
+      n *= dim;
+    int64_t gridX = (n + 31) / 32;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MUL R1, R0, 4\n"
+       << "ADD R1, R1, " << *inputOffset << "\n"
+       << "LDG R2, [R1]\n"
+       << "MUL R3, R2, " << scale << "\n"
+       << "MUL R4, R0, 4\n"
+       << "ADD R4, R4, " << *outputOffset << "\n"
+       << "STG [R4], R3\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText>
   emitSelectLinalgIsa(mgpu::LaunchOp launch, linalg::GenericOp generic) {
     auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
     if (dstOp.getDpsInputs().size() != 3 || dstOp.getDpsInits().size() != 1)
@@ -1895,6 +1971,8 @@ struct MGpuToIsaPass
         [&](linalg::GenericOp generic) { generics.push_back(generic); });
 
     for (linalg::GenericOp generic : generics) {
+      if (auto isa = emitFloatScaleLinalgIsa(launch, generic))
+        return isa;
       if (auto isa = emitSelectLinalgIsa(launch, generic))
         return isa;
       if (auto isa = emitFloatConstantDivLinalgIsa(launch, generic))
