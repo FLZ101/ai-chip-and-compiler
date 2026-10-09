@@ -34,7 +34,9 @@ struct MapToMGPUPass
     for (Operation &op : func.getBody().front()) {
       if (auto forOp = dyn_cast<scf::ForOp>(op))
         topLevelLoops.push_back(forOp);
-      else if (isa<linalg::MatmulOp, linalg::Conv2DNchwFchwOp>(op))
+      else if (isa<linalg::MatmulOp, linalg::Conv2DNchwFchwOp,
+                    linalg::GenericOp, linalg::PoolingNchwMaxOp,
+                    linalg::PoolingNchwSumOp>(op))
         topLevelComputeOps.push_back(&op);
     }
 

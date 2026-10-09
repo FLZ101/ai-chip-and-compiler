@@ -2,7 +2,7 @@
 // CHECK: func.func @sub
 // CHECK: "mgpu.isa"()
 // CHECK-SAME: code = "MOV R0, ctaid.x
-// CHECK-SAME: SUB R6, R4, R5
+// CHECK-SAME: SUB R10, R6, R9
 
 module {
   func.func @sub(%arg0: memref<4xf32>, %arg1: memref<4xf32>) -> memref<4xf32> {

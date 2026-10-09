@@ -4,6 +4,8 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -195,7 +197,15 @@ struct MGpuToIsaPass
 
     IRRewriter rewriter(&getContext());
     for (mgpu::LaunchOp launch : launches) {
-      if (auto isa = emitVectorAddIsa(launch)) {
+      if (auto isa = emitElementwiseGenericIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitVectorAddIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
             launch.getLoc(),
@@ -204,6 +214,22 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
       } else if (auto isa = emitLinalgGenericIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitGlobalAvgPoolIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitUnaryGenericIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
             launch.getLoc(),
@@ -268,14 +294,6 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
       } else if (auto isa = emitPoolingIsa(launch, /*maxPool=*/false)) {
-        rewriter.setInsertionPoint(launch);
-        rewriter.create<mgpu::IsaOp>(
-            launch.getLoc(),
-            StringAttr::get(&getContext(), isa->code),
-            StringAttr::get(&getContext(), isa->grid),
-            StringAttr::get(&getContext(), isa->block));
-        rewriter.eraseOp(launch);
-      } else if (auto isa = emitGlobalAvgPoolIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
             launch.getLoc(),
@@ -451,6 +469,15 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->grid),
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
+      } else {
+        // Every launch must be replaced by an ``mgpu.isa`` op.  Failing with
+        // a diagnostic here is intentional: silently leaving an
+        // ``mgpu.launch`` in the module would make the Python side think the
+        // model lowered successfully while the simulator would have no
+        // instruction stream for this launch.
+        diagnoseUnsupportedLaunch(launch);
+        signalPassFailure();
+        return;
       }
     }
   }
@@ -462,6 +489,380 @@ struct MGpuToIsaPass
   };
 
   BufferMap bufferMap;
+
+  std::string materializeAffineExpr(llvm::raw_ostream &os, AffineExpr expr,
+                                    ArrayRef<int> indexRegs,
+                                    VirtualRegisterAllocator &regs) const {
+    if (auto constant = dyn_cast<AffineConstantExpr>(expr)) {
+      int reg = regs.acquire();
+      os << "MOV " << regs.name(reg) << ", " << constant.getValue() << "\n";
+      return regs.name(reg);
+    }
+    if (auto dim = dyn_cast<AffineDimExpr>(expr)) {
+      unsigned position = dim.getPosition();
+      if (position >= indexRegs.size())
+        return "";
+      return regs.name(indexRegs[position]);
+    }
+
+    auto binary = dyn_cast<AffineBinaryOpExpr>(expr);
+    if (!binary)
+      return "";
+
+    std::string lhs =
+        materializeAffineExpr(os, binary.getLHS(), indexRegs, regs);
+    std::string rhs =
+        materializeAffineExpr(os, binary.getRHS(), indexRegs, regs);
+    if (lhs.empty() || rhs.empty())
+      return "";
+
+    int result = regs.acquire();
+    if (binary.getKind() == AffineExprKind::Add) {
+      os << "ADD " << regs.name(result) << ", " << lhs << ", " << rhs << "\n";
+    } else if (binary.getKind() == AffineExprKind::Mul) {
+      os << "MUL " << regs.name(result) << ", " << lhs << ", " << rhs << "\n";
+    } else {
+      return "";
+    }
+    return regs.name(result);
+  }
+
+  std::optional<IsaText>
+  emitElementwiseGenericIsa(mgpu::LaunchOp launch) {
+    SmallVector<linalg::GenericOp> generics;
+    launch.getBody().front().walk(
+        [&](linalg::GenericOp generic) { generics.push_back(generic); });
+
+    for (linalg::GenericOp generic : generics) {
+      auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+      if (dstOp.getDpsInputs().size() != 2 || dstOp.getDpsInits().empty())
+        continue;
+
+      auto opcode = binaryArithOpcode(generic);
+      if (!opcode)
+        continue;
+
+      auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+      if (!outputType || outputType.getRank() < 1 || outputType.getRank() > 4)
+        continue;
+      if (!outputType.getElementType().isF32())
+        continue;
+      if (llvm::any_of(outputType.getShape(),
+                       [](int64_t dim) { return ShapedType::isDynamic(dim); }))
+        continue;
+
+      SmallVector<MemRefType> inputTypes;
+      inputTypes.reserve(2);
+      for (Value input : dstOp.getDpsInputs()) {
+        auto type = dyn_cast<MemRefType>(input.getType());
+        if (!type || type.getRank() < 1 || type.getRank() > 4 ||
+            !type.getElementType().isF32())
+          continue;
+        if (llvm::any_of(type.getShape(),
+                         [](int64_t dim) { return ShapedType::isDynamic(dim); }))
+          continue;
+        inputTypes.push_back(type);
+      }
+      if (inputTypes.size() != 2)
+        continue;
+
+      auto maps = generic.getIndexingMapsArray();
+      if (maps.size() != 3)
+        continue;
+
+      int64_t rank = outputType.getRank();
+      SmallVector<int64_t> shape(rank);
+      for (int64_t i = 0; i < rank; ++i)
+        shape[i] = outputType.getShape()[i];
+
+      int64_t total = 1;
+      for (int64_t dim : shape)
+        total *= dim;
+
+      VirtualRegisterAllocator regs;
+      int tid = regs.acquire();
+      int limit = regs.acquire();
+      int pred = regs.acquire();
+
+      SmallVector<int> indexRegs;
+      for (int64_t i = 0; i < rank; ++i)
+        indexRegs.push_back(regs.acquire());
+
+      std::string code;
+      llvm::raw_string_ostream os(code);
+      os << "MOV " << regs.name(tid) << ", ctaid.x\n"
+         << "MUL " << regs.name(tid) << ", " << regs.name(tid) << ", ntid.x\n"
+         << "ADD " << regs.name(tid) << ", " << regs.name(tid) << ", tid.x\n"
+         << "MOV " << regs.name(limit) << ", " << total << "\n"
+         << "CMP.LT " << regs.name(pred) << ", " << regs.name(tid) << ", "
+         << regs.name(limit) << "\n"
+         << "BRA body, " << regs.name(pred) << ", end\n"
+         << "BRA end\n"
+         << "body:\n";
+
+      if (rank == 1) {
+        os << "MOV " << regs.name(indexRegs[0]) << ", " << regs.name(tid)
+           << "\n";
+      } else if (rank == 2) {
+        os << "IDIV " << regs.name(indexRegs[0]) << ", " << regs.name(tid)
+           << ", " << shape[1] << "\n"
+           << "MUL R31, " << regs.name(indexRegs[0]) << ", " << shape[1]
+           << "\n"
+           << "SUB " << regs.name(indexRegs[1]) << ", " << regs.name(tid)
+           << ", R31\n";
+      } else if (rank == 3) {
+        int64_t outer = shape[1] * shape[2];
+        os << "IDIV " << regs.name(indexRegs[0]) << ", " << regs.name(tid)
+           << ", " << outer << "\n"
+           << "MUL R31, " << regs.name(indexRegs[0]) << ", " << outer << "\n"
+           << "SUB R30, " << regs.name(tid) << ", R31\n"
+           << "IDIV " << regs.name(indexRegs[1]) << ", R30, " << shape[2]
+           << "\n"
+           << "MUL R31, " << regs.name(indexRegs[1]) << ", " << shape[2]
+           << "\n"
+           << "SUB " << regs.name(indexRegs[2]) << ", R30, R31\n";
+      } else {
+        int64_t outer = shape[1] * shape[2] * shape[3];
+        int64_t middle = shape[2] * shape[3];
+        os << "IDIV " << regs.name(indexRegs[0]) << ", " << regs.name(tid)
+           << ", " << outer << "\n"
+           << "MUL R31, " << regs.name(indexRegs[0]) << ", " << outer << "\n"
+           << "SUB R30, " << regs.name(tid) << ", R31\n"
+           << "IDIV " << regs.name(indexRegs[1]) << ", R30, " << middle << "\n"
+           << "MUL R31, " << regs.name(indexRegs[1]) << ", " << middle << "\n"
+           << "SUB R29, R30, R31\n"
+           << "IDIV " << regs.name(indexRegs[2]) << ", R29, " << shape[3]
+           << "\n"
+           << "MUL R31, " << regs.name(indexRegs[2]) << ", " << shape[3]
+           << "\n"
+           << "SUB " << regs.name(indexRegs[3]) << ", R29, R31\n";
+      }
+
+      SmallVector<std::string> loadedValues;
+      for (unsigned i = 0; i < inputTypes.size(); ++i) {
+        MemRefType inputType = inputTypes[i];
+        AffineMap map = maps[i];
+        int64_t inputRank = inputType.getRank();
+        int linearReg = regs.acquire();
+        os << "MOV " << regs.name(linearReg) << ", 0\n";
+
+        for (int64_t j = 0; j < inputRank; ++j) {
+          std::string coord = materializeAffineExpr(
+              os, map.getResult(j), indexRegs, regs);
+          if (coord.empty())
+            return std::nullopt;
+
+          int64_t stride = 1;
+          for (int64_t k = j + 1; k < inputRank; ++k)
+            stride *= inputType.getShape()[k];
+
+          std::string term = coord;
+          if (stride != 1) {
+            int termReg = regs.acquire();
+            os << "MUL " << regs.name(termReg) << ", " << coord << ", "
+               << stride << "\n";
+            term = regs.name(termReg);
+          }
+          os << "ADD " << regs.name(linearReg) << ", " << regs.name(linearReg)
+             << ", " << term << "\n";
+        }
+
+        int addrReg = regs.acquire();
+        os << "MUL " << regs.name(addrReg) << ", " << regs.name(linearReg)
+           << ", 4\n"
+           << "ADD " << regs.name(addrReg) << ", " << regs.name(addrReg)
+           << ", " << bufferMap.base(dstOp.getDpsInputs()[i]) << "\n";
+        int valueReg = regs.acquire();
+        os << "LDG " << regs.name(valueReg) << ", [" << regs.name(addrReg)
+           << "]\n";
+        loadedValues.push_back(regs.name(valueReg));
+      }
+
+      int resultReg = regs.acquire();
+      os << *opcode << " " << regs.name(resultReg) << ", " << loadedValues[0]
+         << ", " << loadedValues[1] << "\n";
+
+      int outputAddrReg = regs.acquire();
+      os << "MUL " << regs.name(outputAddrReg) << ", " << regs.name(tid)
+         << ", 4\n"
+         << "ADD " << regs.name(outputAddrReg) << ", " << regs.name(outputAddrReg)
+         << ", " << bufferMap.base(dstOp.getDpsInits()[0]) << "\n"
+         << "STG [" << regs.name(outputAddrReg) << "], " << regs.name(resultReg)
+         << "\n"
+         << "BRA end\n"
+         << "end:\n"
+         << "EXIT\n";
+      os.flush();
+
+      IsaText isa;
+      isa.code = code;
+      isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+      isa.block = "32x1x1";
+      return isa;
+    }
+    return std::nullopt;
+  }
+
+  static double getFloatConstant(Value value) {
+    auto constantOp = value.getDefiningOp<arith::ConstantOp>();
+    if (!constantOp)
+      return 0.0;
+    if (auto floatAttr = dyn_cast<FloatAttr>(constantOp.getValue()))
+      return floatAttr.getValueAsDouble();
+    return 0.0;
+  }
+
+  std::optional<IsaText> emitUnaryGenericIsa(mgpu::LaunchOp launch) {
+    SmallVector<linalg::GenericOp> generics;
+    launch.getBody().front().walk(
+        [&](linalg::GenericOp generic) { generics.push_back(generic); });
+
+    for (linalg::GenericOp generic : generics) {
+      auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+      if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().empty())
+        continue;
+
+      auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+      auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+      if (!inputType || !outputType)
+        continue;
+      if (!inputType.getElementType().isF32() ||
+          !outputType.getElementType().isF32())
+        continue;
+      if (llvm::any_of(inputType.getShape(),
+                       [](int64_t dim) { return ShapedType::isDynamic(dim); }) ||
+          llvm::any_of(outputType.getShape(),
+                       [](int64_t dim) { return ShapedType::isDynamic(dim); }))
+        continue;
+
+      int64_t inputElements = 1;
+      int64_t outputElements = 1;
+      for (int64_t dim : inputType.getShape())
+        inputElements *= dim;
+      for (int64_t dim : outputType.getShape())
+        outputElements *= dim;
+      if (inputElements != outputElements)
+        continue;
+
+      bool hasRsqrt = false;
+      bool hasDiv = false;
+      bool hasAdd = false;
+      bool hasTrunc = false;
+      generic.getRegion().walk([&](Operation *op) {
+        if (isa<math::RsqrtOp>(op))
+          hasRsqrt = true;
+        else if (isa<arith::DivFOp>(op))
+          hasDiv = true;
+        else if (isa<arith::AddFOp>(op))
+          hasAdd = true;
+        else if (isa<arith::TruncFOp>(op))
+          hasTrunc = true;
+      });
+
+      if (!hasRsqrt && !hasDiv && !(hasAdd && hasTrunc))
+        continue;
+
+      Value inputBlockArg = generic.getRegion().front().getArgument(0);
+      std::string opcode;
+      double constant = 0.0;
+      if (hasRsqrt) {
+        opcode = "RSQRT";
+      } else if (hasDiv) {
+        opcode = "DIV";
+        std::optional<arith::DivFOp> divOp;
+        generic.getRegion().walk([&](arith::DivFOp op) {
+          if (!divOp)
+            divOp = op;
+        });
+        if (!divOp)
+          continue;
+        Value lhs = divOp->getLhs();
+        Value rhs = divOp->getRhs();
+        if (lhs == inputBlockArg) {
+          constant = getFloatConstant(rhs);
+          if (!rhs.getDefiningOp<arith::ConstantOp>())
+            continue;
+        } else if (rhs == inputBlockArg) {
+          continue;
+        } else {
+          continue;
+        }
+      } else if (hasAdd && hasTrunc) {
+        opcode = "ADD";
+        std::optional<arith::TruncFOp> truncOp;
+        generic.getRegion().walk([&](arith::TruncFOp op) {
+          if (!truncOp)
+            truncOp = op;
+        });
+        if (!truncOp)
+          continue;
+        Value constantOperand = truncOp->getIn();
+        if (!constantOperand.getDefiningOp<arith::ConstantOp>())
+          continue;
+        constant = getFloatConstant(constantOperand);
+      }
+
+      int64_t total = outputElements;
+      int64_t inputBase = bufferMap.base(dstOp.getDpsInputs()[0]);
+      int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
+
+      std::string code;
+      llvm::raw_string_ostream os(code);
+      emitCnnPrologue(os, total);
+      os << "MUL R3, R0, 4\n"
+         << "ADD R3, R3, " << inputBase << "\n"
+         << "LDG R5, [R3]\n";
+      if (opcode == "RSQRT") {
+        os << "RSQRT R6, R5\n";
+      } else {
+        os << opcode << " R6, R5, " << constant << "\n";
+      }
+      os << "MUL R4, R0, 4\n"
+         << "ADD R4, R4, " << outputBase << "\n"
+         << "STG [R4], R6\n";
+      emitCnnFinish(os);
+      os.flush();
+
+      IsaText isa;
+      isa.code = code;
+      isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+      isa.block = "32x1x1";
+      return isa;
+    }
+    return std::nullopt;
+  }
+
+  void diagnoseUnsupportedLaunch(mgpu::LaunchOp launch) {
+    Operation *firstUnsupported = nullptr;
+    launch.getBody().front().walk([&](Operation *op) {
+      if (!firstUnsupported && !isa<mgpu::ReturnOp, mgpu::ThreadIdOp,
+                                    mgpu::BlockIdOp, mgpu::GridDimOp,
+                                    mgpu::BlockDimOp>(op)) {
+        firstUnsupported = op;
+      }
+    });
+
+    InFlightDiagnostic diag =
+        launch.emitOpError("cannot lower mgpu.launch to simulator ISA");
+    if (!firstUnsupported) {
+      diag << "; launch body contains no computable operation";
+      return;
+    }
+
+    diag << "; unsupported operation: " << firstUnsupported->getName();
+    for (OpOperand &operand : firstUnsupported->getOpOperands()) {
+      Type type = operand.get().getType();
+      if (auto memref = dyn_cast<MemRefType>(type)) {
+        diag << " operand=" << memref;
+      } else if (type) {
+        diag << " dtype=" << type;
+      }
+    }
+    for (OpResult result : firstUnsupported->getResults()) {
+      if (auto memref = dyn_cast<MemRefType>(result.getType()))
+        diag << " result=" << memref;
+    }
+  }
 
   std::optional<IsaText> emitVectorAddIsa(mgpu::LaunchOp launch) {
     SmallVector<linalg::GenericOp> generics;
@@ -3564,6 +3965,7 @@ struct MGpuToIsaPass
     std::string code;
     llvm::raw_string_ostream os(code);
     bool foundMGpuOp = false;
+    bool foundUnsupportedCompute = false;
     LinearScanRegisterAllocator regs(/*physicalRegisters=*/4,
                                      /*spillBase=*/4096);
     std::vector<int> liveRegisters;
@@ -3611,9 +4013,15 @@ struct MGpuToIsaPass
       } else if (isa<mgpu::RequantOp>(op)) {
         os << "// mgpu.requant\n";
         foundMGpuOp = true;
+      } else if (isa<memref::AllocOp, memref::DeallocOp>(op)) {
+        // Buffer declarations are side-effect plumbing for already-specialized
+        // mgpu ops (for example quantization).  They are not compute and must
+        // not make the generic launch look unsupported.
       } else if (isa<mgpu::ReturnOp>(op)) {
         os << "EXIT\n";
         foundMGpuOp = true;
+      } else {
+        foundUnsupportedCompute = true;
       }
     }
 
@@ -3622,7 +4030,7 @@ struct MGpuToIsaPass
 
     os.flush();
 
-    if (!foundMGpuOp)
+    if (!foundMGpuOp || foundUnsupportedCompute)
       return std::nullopt;
 
     IsaText result;

@@ -16,8 +16,10 @@ from .importer import (
 from .mlir_builder import MLIRBuilder, MLIRBuilderError
 from .mgpu_runner import (
     DEFAULT_MODEL_PIPELINE,
+    MGpuIsaBundle,
     MGpuIsaResult,
     MGpuOptError,
+    enqueue_isa_bundle,
     lower_with_mgpu_opt,
     run_mgpu_pipeline,
     run_model_pipeline,
@@ -36,6 +38,7 @@ __all__ = [
     "MLIRBuilder",
     "MLIRBuilderError",
     "MGpuToIsaError",
+    "MGpuIsaBundle",
     "MGpuIsaResult",
     "MGpuOptError",
     "ONNXImportError",
@@ -46,6 +49,7 @@ __all__ = [
     "TorchMLIRImportError",
     "TorchMLIRImporter",
     "TorchMLIRImportResult",
+    "enqueue_isa_bundle",
     "lower_mgpu_to_isa",
     "lower_with_mgpu_opt",
     "run_mgpu_pipeline",
