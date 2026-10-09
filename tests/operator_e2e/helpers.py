@@ -385,6 +385,7 @@ def _software_request(
             "input_shape": values[0].shape,
             "output_shape": output.shape,
             "paddings": (before, after),
+            "pad_value": float(node.attrs.get("value", 0.0)),
             "input_offset": offset(values[0]),
             "output_offset": offset(output),
         }

@@ -8,10 +8,11 @@ from pathlib import Path
 
 import numpy as np
 
+from compiler.codegen import lower_kernel
 from compiler.frontends.manual_frontend import ManualFrontend
 from compiler.model_ir import DType
 
-from .helpers import make_device, run_operator_e2e
+from .helpers import make_device, run_operator_e2e, run_software_model_e2e
 
 CPP_SIM_DIR = Path(__file__).resolve().parents[2] / ".deps" / "cpp-sim-build"
 if str(CPP_SIM_DIR) not in sys.path:
@@ -46,6 +47,31 @@ def _conv2d_reference(image, weight, bias, *, stride=1, padding=0, dilation=1):
 
 
 class TestSoftwareKernelsEndToEnd(unittest.TestCase):
+    def _assert_equivalent(self, graph, inputs, expected, *, rtol=1e-5, atol=1e-5):
+        software = run_software_model_e2e(
+            make_device(global_size=1 << 24, sm_count=4),
+            graph,
+            inputs,
+            [expected],
+            rtol=rtol,
+            atol=atol,
+        )
+        mgpu = run_operator_e2e(
+            make_device(global_size=1 << 24, sm_count=4),
+            graph,
+            inputs,
+            [expected],
+            lowering=lower_kernel,
+            rtol=rtol,
+            atol=atol,
+        )
+        np.testing.assert_allclose(
+            software.outputs[0],
+            mgpu.outputs[0],
+            rtol=rtol,
+            atol=atol,
+        )
+
     def test_conv2d_software_matches_mgpu_and_reference(self):
         rng = np.random.default_rng(12)
         image = rng.normal(size=(1, 2, 6, 6)).astype(np.float32)
@@ -141,6 +167,125 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
             rtol=1e-5,
             atol=1e-5,
         )
+
+    def test_matmul_software_matches_mgpu(self):
+        rng = np.random.default_rng(1)
+        a = rng.normal(size=(2, 3)).astype(np.float32)
+        b = rng.normal(size=(3, 4)).astype(np.float32)
+        frontend = ManualFrontend("matmul")
+        lhs = frontend.add_input("a", DType.F32, a.shape)
+        rhs = frontend.add_input("b", DType.F32, b.shape)
+        frontend.output(frontend.matmul(lhs, rhs))
+        self._assert_equivalent(frontend.build(), {"a": a, "b": b}, a @ b)
+
+    def test_linear_software_matches_mgpu(self):
+        rng = np.random.default_rng(2)
+        x = rng.normal(size=(2, 3)).astype(np.float32)
+        w = rng.normal(size=(4, 3)).astype(np.float32)
+        bias = rng.normal(size=(4,)).astype(np.float32)
+        frontend = ManualFrontend("linear")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        weight = frontend.add_input("w", DType.F32, w.shape)
+        b = frontend.add_input("b", DType.F32, bias.shape)
+        frontend.output(frontend.linear(value, weight, b))
+        self._assert_equivalent(
+            frontend.build(),
+            {"x": x, "w": w, "b": bias},
+            x @ w.T + bias,
+        )
+
+    def test_relu_software_matches_mgpu(self):
+        rng = np.random.default_rng(3)
+        x = rng.normal(size=(4, 6)).astype(np.float32)
+        frontend = ManualFrontend("relu")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        frontend.output(frontend.relu(value))
+        self._assert_equivalent(
+            frontend.build(),
+            {"x": x},
+            np.maximum(x, 0).astype(np.float32),
+        )
+
+    def test_add_software_matches_mgpu(self):
+        rng = np.random.default_rng(4)
+        a = rng.normal(size=(4, 5)).astype(np.float32)
+        b = rng.normal(size=(4, 5)).astype(np.float32)
+        frontend = ManualFrontend("add")
+        lhs = frontend.add_input("a", DType.F32, a.shape)
+        rhs = frontend.add_input("b", DType.F32, b.shape)
+        frontend.output(frontend.add(lhs, rhs))
+        self._assert_equivalent(frontend.build(), {"a": a, "b": b}, a + b)
+
+    def test_batch_norm_software_matches_mgpu(self):
+        rng = np.random.default_rng(5)
+        x = rng.normal(size=(1, 2, 3, 3)).astype(np.float32)
+        scale = rng.normal(size=(2,)).astype(np.float32) + 1.0
+        bias = rng.normal(size=(2,)).astype(np.float32)
+        mean = rng.normal(size=(2,)).astype(np.float32)
+        var = rng.uniform(0.5, 2.0, size=(2,)).astype(np.float32)
+        eps = 1e-5
+        frontend = ManualFrontend("batch_norm")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        s = frontend.add_input("s", DType.F32, scale.shape)
+        b = frontend.add_input("b", DType.F32, bias.shape)
+        m = frontend.add_input("m", DType.F32, mean.shape)
+        v = frontend.add_input("v", DType.F32, var.shape)
+        frontend.output(frontend.batch_norm(value, s, b, m, v, epsilon=eps))
+        expected = (
+            (x - mean.reshape(1, 2, 1, 1)) / np.sqrt(var.reshape(1, 2, 1, 1) + eps)
+        ) * scale.reshape(1, 2, 1, 1) + bias.reshape(1, 2, 1, 1)
+        self._assert_equivalent(
+            frontend.build(),
+            {"x": x, "s": scale, "b": bias, "m": mean, "v": var},
+            expected,
+        )
+
+    def test_pooling_software_matches_mgpu(self):
+        image = np.arange(1 * 2 * 4 * 4, dtype=np.float32).reshape(1, 2, 4, 4)
+        for op_name in ("max_pool2d", "avg_pool2d"):
+            with self.subTest(op=op_name):
+                frontend = ManualFrontend(op_name)
+                x = frontend.add_input("x", DType.F32, image.shape)
+                if op_name == "max_pool2d":
+                    frontend.output(frontend.max_pool2d(x, kernel=2, strides=2))
+                    expected = image.reshape(1, 2, 2, 2, 2, 2).max(axis=(3, 5))
+                else:
+                    frontend.output(frontend.avg_pool2d(x, kernel=2, strides=2))
+                    expected = image.reshape(1, 2, 2, 2, 2, 2).mean(axis=(3, 5))
+                self._assert_equivalent(frontend.build(), {"x": image}, expected)
+
+    def test_global_avg_pool_software_matches_mgpu(self):
+        image = np.arange(1 * 2 * 3 * 3, dtype=np.float32).reshape(1, 2, 3, 3)
+        frontend = ManualFrontend("global_avg_pool")
+        x = frontend.add_input("x", DType.F32, image.shape)
+        frontend.output(frontend.global_avg_pool(x))
+        self._assert_equivalent(
+            frontend.build(),
+            {"x": image},
+            image.mean(axis=(2, 3), keepdims=True),
+        )
+
+    def test_pad_software_matches_mgpu(self):
+        image = np.arange(8, dtype=np.float32).reshape(1, 2, 2, 2)
+        frontend = ManualFrontend("pad")
+        x = frontend.add_input("x", DType.F32, image.shape)
+        frontend.output(
+            frontend.pad(
+                x,
+                ((0, 0), (0, 0), (1, 1), (1, 1)),
+                value=-1.0,
+            )
+        )
+        expected = np.full((1, 2, 4, 4), -1.0, dtype=np.float32)
+        expected[:, :, 1:3, 1:3] = image
+        self._assert_equivalent(frontend.build(), {"x": image}, expected)
+
+    def test_reshape_software_matches_mgpu(self):
+        image = np.arange(8, dtype=np.float32).reshape(1, 2, 2, 2)
+        frontend = ManualFrontend("reshape")
+        x = frontend.add_input("x", DType.F32, image.shape)
+        frontend.output(frontend.reshape(x, (1, 8)))
+        self._assert_equivalent(frontend.build(), {"x": image}, image.reshape(1, 8))
 
 
 if __name__ == "__main__":

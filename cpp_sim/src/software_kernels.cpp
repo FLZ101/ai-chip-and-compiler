@@ -215,7 +215,7 @@ void run_pad(ByteMemory &memory, const SoftwareKernelRequest &r) {
   const int64_t ow = r.output_shape[3];
   const int64_t py = r.paddings[0];
   const int64_t px = r.paddings[1];
-  const float value = -1.0e30f;
+  const float value = static_cast<float>(r.pad_value);
   for (int64_t cc = 0; cc < c; ++cc) {
     for (int64_t oy = 0; oy < oh; ++oy) {
       for (int64_t ox = 0; ox < ow; ++ox) {

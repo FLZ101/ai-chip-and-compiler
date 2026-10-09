@@ -18,6 +18,7 @@ struct SoftwareKernelRequest {
   std::vector<int64_t> dilations = {1, 1};
   bool has_bias = false;
   double epsilon = 1e-5;
+  double pad_value = 0.0;
   int64_t input_offset = 0;
   int64_t input2_offset = 0;
   int64_t weight_offset = 0;

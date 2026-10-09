@@ -93,6 +93,9 @@ bool software_run(py::buffer global_buffer, const py::dict &request_dict) {
   request.epsilon = request_dict.contains("epsilon")
                         ? request_dict["epsilon"].cast<double>()
                         : 1e-5;
+  request.pad_value = request_dict.contains("pad_value")
+                          ? request_dict["pad_value"].cast<double>()
+                          : 0.0;
   request.input_offset = request_dict["input_offset"].cast<int64_t>();
   request.input2_offset = request_dict.contains("input2_offset")
                               ? request_dict["input2_offset"].cast<int64_t>()
