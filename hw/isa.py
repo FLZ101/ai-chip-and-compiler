@@ -49,6 +49,9 @@ REGISTER_DEST_OPS = {
     # Unary ALU operations.
     "NEG",
     "ABS",
+    # Quantization helpers.
+    "ROUND",
+    "I2F",
     # Min/max used by reductions and activation code.
     "MAX",
     "MIN",
@@ -73,6 +76,10 @@ REGISTER_DEST_OPS = {
     "LDS.F16",
     "LDG.BF16",
     "LDS.BF16",
+    "LDG.F8E4M3",
+    "LDS.F8E4M3",
+    "LDG.F8E5M2",
+    "LDS.F8E5M2",
     "LDG.I8",
     "LDS.I8",
     "LDG.U8",
@@ -95,6 +102,10 @@ MEMORY_DEST_OPS = {
     "STS.F16",
     "STG.BF16",
     "STS.BF16",
+    "STG.F8E4M3",
+    "STS.F8E4M3",
+    "STG.F8E5M2",
+    "STS.F8E5M2",
     "STG.I8",
     "STS.I8",
     "STG.U8",

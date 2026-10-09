@@ -52,6 +52,19 @@ class TestIsaParser(unittest.TestCase):
         program = parse_asm("IDIV R1, R2, R3")
         self.assertEqual(program[0].op, "IDIV")
 
+    def test_parse_quantization_helpers(self):
+        program = parse_asm("""
+            ROUND R0, R1
+            I2F R2, R3
+            LDG.F8E4M3 R4, [R5]
+            STG.F8E5M2 [R6], R4
+        """)
+
+        self.assertEqual(
+            [instr.op for instr in program],
+            ["ROUND", "I2F", "LDG.F8E4M3", "STG.F8E5M2"],
+        )
+
     def test_parse_typed_memory_accesses(self):
         program = parse_asm("""
             LDG.F16 R0, [R1]

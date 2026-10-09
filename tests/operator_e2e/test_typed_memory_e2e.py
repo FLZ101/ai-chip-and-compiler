@@ -1,10 +1,37 @@
 import unittest
 
+import numpy as np
+from ml_dtypes import float8_e4m3fn, float8_e5m2
+
 from hw.device import create_device, launch
 from hw.isa import parse_asm
 
 
 class TestTypedMemoryEndToEnd(unittest.TestCase):
+    def test_fp8_e4m3_store_executes_in_simulator(self):
+        device = create_device(global_size=1 << 20, sm_count=4)
+        values = np.asarray([1.0, -0.5, 0.1015625], dtype=np.float32)
+        for index, value in enumerate(values.tolist()):
+            device.global_memory.write_f8_e4m3(index, value)
+
+        actual = [device.global_memory.read_f8_e4m3(addr) for addr in range(3)]
+        expected = np.asarray(values, dtype=float8_e4m3fn).astype(np.float32)
+        np.testing.assert_allclose(actual, expected, rtol=0, atol=0)
+
+    def test_fp8_e5m2_store_executes_in_simulator(self):
+        device = create_device(global_size=1 << 20, sm_count=4)
+        values = np.asarray([1.0, -0.5, 0.09375, float("inf")], dtype=np.float32)
+        for index, value in enumerate(values.tolist()):
+            device.global_memory.write_f8_e5m2(index, value)
+
+        actual = [device.global_memory.read_f8_e5m2(addr) for addr in range(4)]
+        expected = np.asarray(values, dtype=float8_e5m2).astype(np.float32)
+        for left, right in zip(actual, expected.tolist()):
+            if np.isinf(right):
+                self.assertEqual(left, right)
+            else:
+                self.assertEqual(left, right)
+
     def test_f16_store_executes_in_simulator(self):
         device = create_device(global_size=1 << 20, sm_count=4)
         launch(

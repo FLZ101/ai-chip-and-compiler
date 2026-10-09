@@ -60,6 +60,32 @@ def _build_cnn_onnx() -> onnx.ModelProto:
     return model
 
 
+def _build_qdq_onnx() -> onnx.ModelProto:
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [4])
+    output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [4])
+    scale = helper.make_tensor(
+        "scale", TensorProto.FLOAT, [], np.asarray(0.5, dtype=np.float32).tolist()
+    )
+    zero_point = helper.make_tensor("zero_point", TensorProto.INT8, [], [0])
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                "QuantizeLinear", ["x", "scale", "zero_point"], ["quantized"]
+            ),
+            helper.make_node(
+                "DequantizeLinear", ["quantized", "scale", "zero_point"], ["output"]
+            ),
+        ],
+        "qdq",
+        [x],
+        [output],
+        initializer=[scale, zero_point],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    return model
+
+
 class TestMLIRCanonicalizer(unittest.TestCase):
     def test_fx_import_canonicalizes_to_linalg(self):
         model = TinyLinearBlock()
@@ -118,6 +144,19 @@ class TestMLIRCanonicalizer(unittest.TestCase):
         self.assertEqual(result.target, "tosa")
         self.assertIn("tosa.", result.text)
         self.assertNotIn("torch.operator", result.text)
+        self.assertTrue(result.mlir_module.operation.verify())
+
+    def test_onnx_qdq_canonicalizes_to_arith_conversions(self):
+        imported = ONNXImporter().import_model(_build_qdq_onnx())
+
+        result = MLIRCanonicalizer().canonicalize(imported)
+
+        self.assertEqual(result.target, "linalg-on-tensors")
+        self.assertIn("linalg.generic", result.text)
+        self.assertIn("arith.fptosi", result.text)
+        self.assertIn("arith.sitofp", result.text)
+        self.assertNotIn("onnx.QuantizeLinear", result.text)
+        self.assertNotIn("onnx.DequantizeLinear", result.text)
         self.assertTrue(result.mlir_module.operation.verify())
 
 

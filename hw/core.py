@@ -573,6 +573,10 @@ def _alu(
         return -a
     if op == "ABS":
         return abs(a)
+    if op == "ROUND":
+        return int(round(a))
+    if op == "I2F":
+        return float(a)
     if op == "RCP":
         return 1.0 / a
     if op == "RSQRT":
@@ -842,6 +846,10 @@ def _read_typed(memory: ByteMemory, dtype: str, addr: int) -> int | float:
         return memory.read_f16(addr)
     if dtype == "BF16":
         return memory.read_bf16(addr)
+    if dtype == "F8E4M3":
+        return memory.read_f8_e4m3(addr)
+    if dtype == "F8E5M2":
+        return memory.read_f8_e5m2(addr)
     if dtype == "I8":
         return memory.read_i8(addr)
     if dtype == "U8":
@@ -862,6 +870,10 @@ def _write_typed(memory: ByteMemory, dtype: str, addr: int, value: int | float) 
         memory.write_f16(addr, float(value))
     elif dtype == "BF16":
         memory.write_bf16(addr, float(value))
+    elif dtype == "F8E4M3":
+        memory.write_f8_e4m3(addr, float(value))
+    elif dtype == "F8E5M2":
+        memory.write_f8_e5m2(addr, float(value))
     elif dtype == "I8":
         memory.write_i8(addr, int(value))
     elif dtype == "U8":
@@ -944,6 +956,8 @@ def execute_warp(
             "MOV",
             "NEG",
             "ABS",
+            "ROUND",
+            "I2F",
             "RCP",
             "RSQRT",
             "EXP2",

@@ -379,33 +379,36 @@ def MGPU_Conv2DOp : MGPU_Op<"conv2d", [MemoryEffects<[MemRead, MemWrite]>]> {
   }];
 }
 
-def MGPU_QuantOp : MGPU_Op<"quant", [Pure]> {
-  let summary = "Quantize a value using scale and zero point";
-  let arguments = (ins AnyType:$input,
+def MGPU_QuantOp : MGPU_Op<"quant", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Quantize a memref using scale and zero point";
+  let arguments = (ins AnyMemRef:$input,
+                       AnyMemRef:$output,
                        F32Attr:$scale,
                        I32Attr:$zeroPoint,
                        TypeAttr:$storageType);
-  let results = (outs AnyType:$result);
+  let results = (outs);
 }
 
-def MGPU_DequantOp : MGPU_Op<"dequant", [Pure]> {
-  let summary = "Dequantize a packed value using scale and zero point";
-  let arguments = (ins AnyType:$input,
+def MGPU_DequantOp : MGPU_Op<"dequant", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Dequantize a memref using scale and zero point";
+  let arguments = (ins AnyMemRef:$input,
+                       AnyMemRef:$output,
                        F32Attr:$scale,
                        I32Attr:$zeroPoint,
                        TypeAttr:$computeType);
-  let results = (outs AnyType:$result);
+  let results = (outs);
 }
 
-def MGPU_RequantOp : MGPU_Op<"requant", [Pure]> {
+def MGPU_RequantOp : MGPU_Op<"requant", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "Requantize between two quantization domains";
-  let arguments = (ins AnyType:$input,
+  let arguments = (ins AnyMemRef:$input,
+                       AnyMemRef:$output,
                        F32Attr:$inputScale,
                        I32Attr:$inputZeroPoint,
                        F32Attr:$outputScale,
                        I32Attr:$outputZeroPoint,
                        TypeAttr:$storageType);
-  let results = (outs AnyType:$result);
+  let results = (outs);
 }
 
 def MGPU_ReturnOp : MGPU_Op<"return", [Terminator]> {

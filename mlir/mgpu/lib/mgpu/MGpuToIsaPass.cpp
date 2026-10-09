@@ -49,6 +49,20 @@ public:
           cursor += byteSize(type);
         }
       });
+      // Quantization/dequantization ops produce memref SSA values directly
+      // rather than writing into an explicit allocation.  Assign those result
+      // values a stable fallback address so ``mgpu-to-isa`` can lower a chain
+      // such as quant -> dequant without an injected memory layout.
+      func.walk([&](Operation *op) {
+        for (Value result : op->getResults()) {
+          if (map.offsets.count(result))
+            continue;
+          if (auto type = dyn_cast<MemRefType>(result.getType())) {
+            map.offsets[result] = cursor;
+            cursor += byteSize(type);
+          }
+        }
+      });
     }
     return map;
   }
@@ -72,8 +86,25 @@ private:
     int64_t elements = 1;
     for (int64_t dim : type.getShape())
       elements *= dim;
-    // Python simulator buffers are always FP32-sized in the current harness.
-    return elements * 4;
+    Type elementType = type.getElementType();
+    if (auto intType = dyn_cast<IntegerType>(elementType);
+        intType && intType.getWidth() == 4) {
+      // INT4/UINT4 values are packed two per byte.
+      return (elements + 1) / 2;
+    }
+    return elements * elementByteSize(elementType);
+  }
+
+  static int64_t elementByteSize(Type elementType) {
+    if (auto intType = dyn_cast<IntegerType>(elementType))
+      return std::max<int64_t>(1, intType.getWidth() / 8);
+    if (isa<Float8E4M3FNType>(elementType) || isa<Float8E5M2Type>(elementType))
+      return 1;
+    if (elementType.isF16() || elementType.isBF16())
+      return 2;
+    if (elementType.isF64())
+      return 8;
+    return 4;
   }
 
   DenseMap<Value, int64_t> offsets;
@@ -189,6 +220,14 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
       } else if (auto isa = emitMatmulIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitScalarMatmulIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
             launch.getLoc(),
@@ -373,6 +412,14 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
       } else if (auto isa = emitAttentionIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
+      } else if (auto isa = emitQuantIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
             launch.getLoc(),
@@ -2326,6 +2373,100 @@ struct MGpuToIsaPass
     return result;
   }
 
+  std::optional<IsaText> emitScalarMatmulIsa(mgpu::LaunchOp launch) {
+    SmallVector<linalg::MatmulOp> matmuls;
+    launch.getBody().front().walk(
+        [&](linalg::MatmulOp matmul) { matmuls.push_back(matmul); });
+    if (matmuls.empty())
+      return std::nullopt;
+
+    linalg::MatmulOp matmul = matmuls.front();
+    auto dstOp = cast<DestinationStyleOpInterface>(matmul.getOperation());
+    if (dstOp.getDpsInputs().size() < 2 || dstOp.getDpsInits().empty())
+      return std::nullopt;
+
+    auto aType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto bType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[1].getType());
+    auto cType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!aType || !bType || !cType)
+      return std::nullopt;
+    if (aType.getRank() != 2 || bType.getRank() != 2 || cType.getRank() != 2)
+      return std::nullopt;
+
+    int64_t m = aType.getShape()[0];
+    int64_t k = aType.getShape()[1];
+    int64_t kB = bType.getShape()[0];
+    int64_t n = bType.getShape()[1];
+    int64_t total = m * n;
+    if (k != kB || total > 32)
+      return std::nullopt;
+
+    Type aElementType = aType.getElementType();
+    Type bElementType = bType.getElementType();
+    Type cElementType = cType.getElementType();
+    if (isNibbleType(aElementType) || isNibbleType(bElementType) ||
+        isNibbleType(cElementType))
+      return std::nullopt;
+
+    int64_t aStride = elementStride(aElementType);
+    int64_t bStride = elementStride(bElementType);
+    int64_t cStride = elementStride(cElementType);
+    int64_t aBase = bufferMap.base(dstOp.getDpsInputs()[0]);
+    int64_t bBase = bufferMap.base(dstOp.getDpsInputs()[1]);
+    int64_t cBase = bufferMap.base(dstOp.getDpsInits()[0]);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, tid.x\n"
+       << "MOV R1, " << total << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MOV R1, " << n << "\n"
+       << "IDIV R2, R0, R1\n"
+       << "MUL R3, R2, R1\n"
+       << "SUB R4, R0, R3\n"
+       << "MOV R5, 0\n"
+       << "MOV R6, 0\n"
+       << "MOV R7, " << k << "\n"
+       << "mat_loop:\n"
+       << "CMP.LT R8, R6, R7\n"
+       << "BRA mat_body, R8, mat_end\n"
+       << "BRA mat_end\n"
+       << "mat_body:\n"
+       << "MUL R9, R2, R7\n"
+       << "ADD R9, R9, R6\n"
+       << "MUL R9, R9, " << aStride << "\n"
+       << "ADD R9, R9, " << aBase << "\n"
+       << typedLoadOpcode(aType) << " R10, [R9]\n"
+       << "MUL R11, R6, R1\n"
+       << "ADD R11, R11, R4\n"
+       << "MUL R11, R11, " << bStride << "\n"
+       << "ADD R11, R11, " << bBase << "\n"
+       << typedLoadOpcode(bType) << " R12, [R11]\n"
+       << "MUL R13, R10, R12\n"
+       << "ADD R5, R5, R13\n"
+       << "ADD R6, R6, 1\n"
+       << "BRA mat_loop\n"
+       << "mat_end:\n"
+       << "MUL R9, R2, R1\n"
+       << "ADD R9, R9, R4\n"
+       << "MUL R9, R9, " << cStride << "\n"
+       << "ADD R9, R9, " << cBase << "\n"
+       << typedStoreOpcode(cType) << " [R9], R5\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText result;
+    result.code = code;
+    result.grid = "1x1x1";
+    result.block = "32x1x1";
+    return result;
+  }
+
   static void emitConvAFragment(
       llvm::raw_ostream &os, int dest, int rowGroup, int colGroup,
       int64_t imageBase, int64_t c, int64_t h, int64_t w, int64_t kh,
@@ -2463,10 +2604,16 @@ struct MGpuToIsaPass
     auto imageType = dyn_cast<MemRefType>(imageValue.getType());
     auto weightType = dyn_cast<MemRefType>(weightValue.getType());
     auto outputType = dyn_cast<MemRefType>(outputValue.getType());
+    auto biasType =
+        hasBias ? dyn_cast<MemRefType>(biasValue.getType()) : nullptr;
     if (!imageType || !weightType || !outputType)
       return std::nullopt;
     if (imageType.getRank() != 4 || weightType.getRank() != 4 ||
         outputType.getRank() != 4)
+      return std::nullopt;
+    if (isNibbleType(imageType.getElementType()) ||
+        isNibbleType(weightType.getElementType()) ||
+        isNibbleType(outputType.getElementType()))
       return std::nullopt;
 
     int64_t n = imageType.getShape()[0];
@@ -2486,11 +2633,14 @@ struct MGpuToIsaPass
       return std::nullopt;
     int64_t spatialSize = oh * ow;
     int64_t reductionSize = c * kh * kw;
-    if (padY != 0 || padX != 0 || strideY != 1 || strideX != 1 ||
+    bool typedConv = !imageType.getElementType().isF32() ||
+                     !weightType.getElementType().isF32() ||
+                     !outputType.getElementType().isF32();
+    if (typedConv || padY != 0 || padX != 0 || strideY != 1 || strideX != 1 ||
         spatialSize > 16 || reductionSize > 16 || f > 16)
       return emitScalarConvIsa(imageValue, weightValue, outputValue, biasValue,
-                               hasBias, c, h, w, f, kh, kw, oh, ow, padY, padX,
-                               strideY, strideX);
+                               biasType, hasBias, c, h, w, f, kh, kw, oh, ow,
+                               padY, padX, strideY, strideX);
 
     int64_t imageBase = bufferMap.base(imageValue);
     int64_t weightBase = bufferMap.base(weightValue);
@@ -2558,9 +2708,17 @@ struct MGpuToIsaPass
 
   std::optional<IsaText> emitScalarConvIsa(
       Value imageValue, Value weightValue, Value outputValue, Value biasValue,
-      bool hasBias, int64_t c, int64_t h, int64_t w, int64_t f, int64_t kh,
-      int64_t kw, int64_t oh, int64_t ow, int64_t padY, int64_t padX,
-      int64_t strideY, int64_t strideX) {
+      MemRefType biasType, bool hasBias, int64_t c, int64_t h, int64_t w,
+      int64_t f, int64_t kh, int64_t kw, int64_t oh, int64_t ow, int64_t padY,
+      int64_t padX, int64_t strideY, int64_t strideX) {
+    auto imageType = dyn_cast<MemRefType>(imageValue.getType());
+    auto weightType = dyn_cast<MemRefType>(weightValue.getType());
+    auto outputType = dyn_cast<MemRefType>(outputValue.getType());
+    if (!imageType || !weightType || !outputType)
+      return std::nullopt;
+    int64_t imageStride = elementStride(imageType.getElementType());
+    int64_t weightStride = elementStride(weightType.getElementType());
+    int64_t outputStride = elementStride(outputType.getElementType());
     int64_t imageBase = bufferMap.base(imageValue);
     int64_t weightBase = bufferMap.base(weightValue);
     int64_t outputBase = bufferMap.base(outputValue);
@@ -2610,9 +2768,9 @@ struct MGpuToIsaPass
              << "ADD R19, R19, R10\n"
              << "MUL R19, R19, " << w << "\n"
              << "ADD R19, R19, R17\n"
-             << "MUL R19, R19, 4\n"
+             << "MUL R19, R19, " << imageStride << "\n"
              << "ADD R19, R19, " << imageBase << "\n"
-             << "LDG R6, [R19]\n"
+             << typedLoadOpcode(imageType) << " R6, [R19]\n"
              << "MOV R7, 0\n"
              << "SEL R8, R18, R6, R7\n"
              << "MOV R9, " << c << "\n"
@@ -2622,18 +2780,19 @@ struct MGpuToIsaPass
              << "ADD R9, R9, " << ky << "\n"
              << "MUL R9, R9, " << kw << "\n"
              << "ADD R9, R9, " << kx << "\n"
-             << "MUL R9, R9, 4\n"
+             << "MUL R9, R9, " << weightStride << "\n"
              << "ADD R9, R9, " << weightBase << "\n"
-             << "LDG R11, [R9]\n"
+             << typedLoadOpcode(weightType) << " R11, [R9]\n"
              << "FMA R20, R8, R11, R20\n";
         }
       }
     }
 
     if (hasBias) {
-      os << "MUL R4, R1, 4\n"
+      os << "MUL R4, R1, "
+         << (biasType ? elementStride(biasType.getElementType()) : 4) << "\n"
          << "ADD R4, R4, " << biasBase << "\n"
-         << "LDG R6, [R4]\n"
+         << (biasType ? typedLoadOpcode(biasType) : "LDG") << " R6, [R4]\n"
          << "ADD R20, R20, R6\n";
     }
 
@@ -2641,9 +2800,9 @@ struct MGpuToIsaPass
        << "MUL R5, R2, " << ow << "\n"
        << "ADD R4, R4, R5\n"
        << "ADD R4, R4, R3\n"
-       << "MUL R4, R4, 4\n"
+       << "MUL R4, R4, " << outputStride << "\n"
        << "ADD R4, R4, " << outputBase << "\n"
-       << "STG [R4], R20\n";
+       << typedStoreOpcode(outputType) << " [R4], R20\n";
     emitCnnFinish(os);
     os.flush();
 
@@ -2925,6 +3084,185 @@ struct MGpuToIsaPass
     result.code = code;
     result.grid = "1x1x1";
     result.block = "32x1x1";
+    return result;
+  }
+
+  static bool isNibbleType(Type type) {
+    auto intType = dyn_cast<IntegerType>(type);
+    return intType && intType.getWidth() == 4;
+  }
+
+  static int64_t elementStride(Type type) {
+    if (auto intType = dyn_cast<IntegerType>(type))
+      return std::max<int64_t>(1, intType.getWidth() / 8);
+    if (isa<Float8E4M3FNType>(type) || isa<Float8E5M2Type>(type))
+      return 1;
+    if (type.isF16() || type.isBF16())
+      return 2;
+    if (type.isF64())
+      return 8;
+    return 4;
+  }
+
+  static std::string typedLoadOpcode(MemRefType type) {
+    return _typedOpcode("LDG", type.getElementType());
+  }
+
+  static std::string typedStoreOpcode(MemRefType type) {
+    return _typedOpcode("STG", type.getElementType());
+  }
+
+  static std::string _typedOpcode(StringRef prefix, Type elementType) {
+    if (elementType.isF32())
+      return prefix.str();
+    if (elementType.isF16())
+      return (prefix + ".F16").str();
+    if (elementType.isBF16())
+      return (prefix + ".BF16").str();
+    if (isa<Float8E4M3FNType>(elementType))
+      return (prefix + ".F8E4M3").str();
+    if (isa<Float8E5M2Type>(elementType))
+      return (prefix + ".F8E5M2").str();
+    if (auto intType = dyn_cast<IntegerType>(elementType)) {
+      if (intType.isUnsigned())
+        return (prefix + (intType.getWidth() == 4 ? ".U4" : ".U8")).str();
+      if (intType.getWidth() == 4)
+        return (prefix + ".I4").str();
+      if (intType.getWidth() == 8)
+        return (prefix + ".I8").str();
+      if (intType.getWidth() == 32)
+        return (prefix + ".I32").str();
+    }
+    llvm::report_fatal_error("mgpu-to-isa: unsupported quant element type");
+  }
+
+  void emitElementAddress(llvm::raw_ostream &os, StringRef dst,
+                          StringRef indexReg, int64_t base, Type elementType) {
+    if (isNibbleType(elementType)) {
+      // Nibble-typed loads/stores use nibble addresses.  The byte offset in
+      // ``BufferMap`` must therefore be converted to a nibble offset before
+      // adding the linear element index.
+      os << "MUL " << dst << ", " << base << ", 2\n"
+         << "ADD " << dst << ", " << dst << ", " << indexReg << "\n";
+      return;
+    }
+    os << "MUL " << dst << ", " << indexReg << ", "
+       << elementStride(elementType) << "\n"
+       << "ADD " << dst << ", " << dst << ", " << base << "\n";
+  }
+
+  std::optional<IsaText> emitQuantIsa(mgpu::LaunchOp launch) {
+    mgpu::QuantOp quant;
+    mgpu::DequantOp dequant;
+    mgpu::RequantOp requant;
+    int quantOpCount = 0;
+    launch.getBody().front().walk([&](Operation *op) {
+      if (isa<mgpu::QuantOp>(op)) {
+        if (!quant)
+          quant = cast<mgpu::QuantOp>(op);
+        ++quantOpCount;
+      } else if (isa<mgpu::DequantOp>(op)) {
+        if (!dequant)
+          dequant = cast<mgpu::DequantOp>(op);
+        ++quantOpCount;
+      } else if (isa<mgpu::RequantOp>(op)) {
+        if (!requant)
+          requant = cast<mgpu::RequantOp>(op);
+        ++quantOpCount;
+      }
+    });
+    if (quantOpCount != 1)
+      return std::nullopt;
+
+    Value inputValue;
+    Value outputValue;
+    double inputScale = 1.0;
+    double outputScale = 1.0;
+    int64_t inputZeroPoint = 0;
+    int64_t outputZeroPoint = 0;
+    bool isQuant = false;
+    bool isDequant = false;
+
+    if (quant) {
+      inputValue = quant.getInput();
+      outputValue = quant.getOutput();
+      inputScale = quant.getScale().convertToDouble();
+      outputZeroPoint = quant.getZeroPoint();
+      isQuant = true;
+    } else if (dequant) {
+      inputValue = dequant.getInput();
+      outputValue = dequant.getOutput();
+      inputScale = dequant.getScale().convertToDouble();
+      inputZeroPoint = dequant.getZeroPoint();
+      isDequant = true;
+    } else {
+      inputValue = requant.getInput();
+      outputValue = requant.getOutput();
+      inputScale = requant.getInputScale().convertToDouble();
+      inputZeroPoint = requant.getInputZeroPoint();
+      outputScale = requant.getOutputScale().convertToDouble();
+      outputZeroPoint = requant.getOutputZeroPoint();
+    }
+
+    auto inputType = dyn_cast<MemRefType>(inputValue.getType());
+    auto outputType = dyn_cast<MemRefType>(outputValue.getType());
+    if (!inputType || !outputType || inputType.getRank() != 1 ||
+        outputType.getRank() != 1)
+      return std::nullopt;
+    if (inputType.getShape()[0] != outputType.getShape()[0])
+      return std::nullopt;
+    if (!isa<IntegerType>(inputType.getElementType()) &&
+        !isa<IntegerType>(outputType.getElementType()))
+      return std::nullopt;
+
+    int64_t n = inputType.getShape()[0];
+    int64_t inputBase = bufferMap.base(inputValue);
+    int64_t outputBase = bufferMap.base(outputValue);
+    int64_t blockSize = 32;
+    int64_t gridX = (n + blockSize - 1) / blockSize;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n";
+
+    emitElementAddress(os, "R3", "R0", inputBase, inputType.getElementType());
+    emitElementAddress(os, "R4", "R0", outputBase, outputType.getElementType());
+    os << typedLoadOpcode(inputType) << " R5, [R3]\n";
+
+    if (isQuant) {
+      os << "DIV R5, R5, " << inputScale << "\n"
+         << "ADD R5, R5, " << outputZeroPoint << "\n"
+         << "ROUND R5, R5\n";
+    } else if (isDequant) {
+      os << "I2F R5, R5\n"
+         << "SUB R5, R5, " << inputZeroPoint << "\n"
+         << "MUL R5, R5, " << inputScale << "\n";
+    } else {
+      os << "I2F R5, R5\n"
+         << "SUB R5, R5, " << inputZeroPoint << "\n"
+         << "MUL R5, R5, " << inputScale << "\n"
+         << "DIV R5, R5, " << outputScale << "\n"
+         << "ADD R5, R5, " << outputZeroPoint << "\n"
+         << "ROUND R5, R5\n";
+    }
+
+    os << typedStoreOpcode(outputType) << " [R4], R5\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText result;
+    result.code = code;
+    result.grid = std::to_string(gridX) + "x1x1";
+    result.block = std::to_string(blockSize) + "x1x1";
     return result;
   }
 

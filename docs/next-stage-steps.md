@@ -464,6 +464,8 @@ Tests:
 
 ### 5.1 Import QDQ patterns
 
+Status: **done**
+
 Recognize:
 
 - `QuantizeLinear`,
@@ -474,7 +476,15 @@ Tests:
 
 - QDQ graph lowers to quant/dequant ops.
 
+The ONNX importer plus the canonicalizer already lower QDQ to
+`arith.fptosi`/`arith.sitofp` inside `linalg.generic`; the explicit
+`mgpu.quant`/`mgpu.dequant`/`mgpu.requant` ops are the target dialect for
+manually constructed quantized graphs.  See
+`tests/unit/test_mlir_canonicalizer.py`.
+
 ### 5.2 Lower INT8 matmul/conv
+
+Status: **done** for scalar INT8 matmul and conv.
 
 Implement:
 
@@ -486,7 +496,13 @@ Tests:
 
 - INT8 matmul/conv match PTQ reference.
 
+Implemented as typed SIMT scalar matmul/conv fallbacks in
+`MGpuToIsaPass.cpp` with INT32 accumulation.  See
+`tests/operator_e2e/test_quantization_e2e.py`.
+
 ### 5.3 Add INT4/UINT4 unpack/dequant
+
+Status: **done**
 
 Implement:
 
@@ -498,7 +514,12 @@ Tests:
 
 - packed matmul matches reference.
 
+Nibble-address semantics are implemented for `mgpu.dequant` and covered by
+the packed-memory and quantization E2E tests.
+
 ### 5.4 Add FP8 E4M3/E5M2
+
+Status: **done**
 
 Implement:
 
@@ -509,6 +530,11 @@ Implement:
 Tests:
 
 - FP8 matmul within documented tolerance.
+
+The simulator now has `f8E4M3FN` and `f8E5M2` typed memory access, and the
+scalar matmul fallback can load/store FP8 operands and accumulate in FP32.
+See `tests/operator_e2e/test_typed_memory_e2e.py` and
+`tests/operator_e2e/test_quantization_e2e.py`.
 
 ---
 

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import struct
 
+import numpy as np
+from ml_dtypes import float8_e4m3fn, float8_e5m2
+
 
 class MemoryError(Exception):
     pass
@@ -12,9 +15,9 @@ class MemoryError(Exception):
 class ByteMemory:
     """A byte-addressable memory region with bounds checking.
 
-    Both global and shared memory use this class.  Loads and stores in the MVP
-    are 32-bit FP32 accesses.  The simulator stores values in a raw
-    ``bytearray`` and converts with little-endian IEEE-754 via ``struct``.
+    Both global and shared memory use this class.  The simulator stores values
+    in a raw ``bytearray`` and exposes typed accessors for FP32/FP16/BF16,
+    FP8, and signed/unsigned integer widths including packed INT4/UINT4.
     """
 
     def __init__(self, size: int, *, name: str = "memory"):
@@ -49,6 +52,28 @@ class ByteMemory:
     def write_f16(self, addr: int, value: float) -> None:
         self.check(addr, 2)
         struct.pack_into("<e", self.data, addr, value)
+
+    def read_f8_e4m3(self, addr: int) -> float:
+        self.check(addr, 1)
+        raw = self.data[addr]
+        value = np.asarray([raw], dtype=np.uint8).view(float8_e4m3fn)[0]
+        return float(value)
+
+    def write_f8_e4m3(self, addr: int, value: float) -> None:
+        self.check(addr, 1)
+        packed = np.asarray([value], dtype=float8_e4m3fn).view(np.uint8)[0]
+        self.data[addr] = int(packed)
+
+    def read_f8_e5m2(self, addr: int) -> float:
+        self.check(addr, 1)
+        raw = self.data[addr]
+        value = np.asarray([raw], dtype=np.uint8).view(float8_e5m2)[0]
+        return float(value)
+
+    def write_f8_e5m2(self, addr: int, value: float) -> None:
+        self.check(addr, 1)
+        packed = np.asarray([value], dtype=float8_e5m2).view(np.uint8)[0]
+        self.data[addr] = int(packed)
 
     def read_bf16(self, addr: int) -> float:
         self.check(addr, 2)
