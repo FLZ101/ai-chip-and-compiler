@@ -270,7 +270,11 @@ class TorchFXFrontend:
     ) -> object:
         value = self._resolve_arg(node.args[0], values)
         if node.target == "reshape":
-            shape = tuple(node.args[1])
+            shape_args = node.args[1:]
+            if len(shape_args) == 1 and isinstance(shape_args[0], (tuple, list)):
+                shape = tuple(shape_args[0])
+            else:
+                shape = tuple(int(arg) for arg in shape_args)
             return frontend.reshape(value, shape)
         if node.target in {"transpose", "permute"}:
             perm = tuple(node.args[1])
