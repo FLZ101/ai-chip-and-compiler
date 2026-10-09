@@ -287,6 +287,54 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
         frontend.output(frontend.reshape(x, (1, 8)))
         self._assert_equivalent(frontend.build(), {"x": image}, image.reshape(1, 8))
 
+    def test_resize_software_matches_mgpu(self):
+        image = np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)
+        frontend = ManualFrontend("resize")
+        x = frontend.add_input("x", DType.F32, image.shape)
+        frontend.output(frontend.resize(x, sizes=(1, 1, 4, 4)))
+        expected = image.repeat(2, axis=2).repeat(2, axis=3)
+        self._assert_equivalent(frontend.build(), {"x": image}, expected)
+
+    def test_softmax_software_matches_mgpu(self):
+        logits = np.asarray([[1.0, 2.0, 3.0], [1.0, 0.0, -1.0]], dtype=np.float32)
+        frontend = ManualFrontend("softmax")
+        x = frontend.add_input("x", DType.F32, logits.shape)
+        frontend.output(frontend.softmax(x, axis=-1))
+        shifted = logits - logits.max(axis=-1, keepdims=True)
+        expected = np.exp(shifted) / np.exp(shifted).sum(axis=-1, keepdims=True)
+        self._assert_equivalent(frontend.build(), {"x": logits}, expected)
+
+    def test_layer_norm_software_matches_mgpu(self):
+        x = np.asarray([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+        w = np.asarray([1.0, 1.0, 1.0], dtype=np.float32)
+        b = np.asarray([0.0, 0.0, 0.0], dtype=np.float32)
+        frontend = ManualFrontend("layer_norm")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        weight = frontend.add_input("w", DType.F32, w.shape)
+        bias = frontend.add_input("b", DType.F32, b.shape)
+        frontend.output(frontend.layer_norm(value, weight, bias))
+        mean = x.mean(axis=-1, keepdims=True)
+        var = x.var(axis=-1, keepdims=True)
+        expected = (x - mean) / np.sqrt(var + 1e-5)
+        self._assert_equivalent(frontend.build(), {"x": x, "w": w, "b": b}, expected)
+
+    def test_rms_norm_software_matches_mgpu(self):
+        x = np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        w = np.asarray([1.0, 1.0], dtype=np.float32)
+        frontend = ManualFrontend("rms_norm")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        weight = frontend.add_input("w", DType.F32, w.shape)
+        frontend.output(frontend.rms_norm(value, weight))
+        rms = np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + 1e-5)
+        expected = x / rms
+        self._assert_equivalent(frontend.build(), {"x": x, "w": w}, expected)
+
+    def test_causal_mask_software_matches_mgpu(self):
+        frontend = ManualFrontend("causal_mask")
+        frontend.output(frontend.causal_mask(query_len=3, key_len=3, batch=1))
+        expected = np.tril(np.ones((3, 3), dtype=np.float32)).reshape(1, 1, 3, 3)
+        self._assert_equivalent(frontend.build(), {}, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -440,7 +440,11 @@ def run_software_model_e2e(
                 file=sys.stderr,
                 flush=True,
             )
-        request = _software_request(node, layout)
+        try:
+            request = _software_request(node, layout)
+        except NotImplementedError:
+            _run_python_software_node(device, node, layout)
+            continue
         if not cpp_sim.software_run(device.global_memory.data, request):
             raise NotImplementedError(f"unsupported software op: {node.op.value}")
 
@@ -455,3 +459,172 @@ def run_software_model_e2e(
         cycles=0,
         profile=None,
     )
+
+
+def _read_node_input(device: Device, value: object, layout: MemoryLayout) -> np.ndarray:
+    buffer = layout[value.name]
+    return read_tensor(device, buffer)
+
+
+def _write_node_output(
+    device: Device,
+    value: object,
+    layout: MemoryLayout,
+    array: np.ndarray,
+) -> None:
+    device.global_memory.load_floats(
+        layout[value.name].base_addr,
+        np.asarray(array, dtype=np.float32).reshape(-1).tolist(),
+    )
+
+
+def _run_python_software_node(
+    device: Device,
+    node: object,
+    layout: MemoryLayout,
+) -> None:
+    op = node.op
+    output = node.outputs[0]
+
+    if op == Op.TRANSPOSE:
+        value = _read_node_input(device, node.inputs[0], layout)
+        perm = node.attrs.get("perm", tuple(reversed(range(value.ndim))))
+        _write_node_output(device, output, layout, np.transpose(value, perm))
+        return
+
+    if op == Op.CONCAT:
+        values = [_read_node_input(device, value, layout) for value in node.inputs]
+        axis = int(node.attrs.get("axis", 0))
+        _write_node_output(device, output, layout, np.concatenate(values, axis=axis))
+        return
+
+    if op == Op.SLICE:
+        value = _read_node_input(device, node.inputs[0], layout)
+        starts = tuple(int(x) for x in node.attrs.get("starts", (0,) * value.ndim))
+        ends = tuple(int(x) for x in node.attrs.get("ends", value.shape))
+        axes = tuple(int(x) for x in node.attrs.get("axes", tuple(range(value.ndim))))
+        steps = tuple(int(x) for x in node.attrs.get("steps", (1,) * value.ndim))
+        slices = [slice(None)] * value.ndim
+        for start, end, axis, step in zip(starts, ends, axes, steps):
+            slices[axis] = slice(start, end, step)
+        _write_node_output(device, output, layout, value[tuple(slices)])
+        return
+
+    if op == Op.RESIZE:
+        value = _read_node_input(device, node.inputs[0], layout)
+        sizes = node.attrs.get("sizes")
+        if sizes is None:
+            scales = tuple(float(x) for x in node.attrs.get("scales", ()))
+            sizes = tuple(
+                max(int(dim * scale), 1) for dim, scale in zip(value.shape, scales)
+            )
+        # Nearest-neighbor resize.
+        output_array = np.empty(tuple(int(x) for x in sizes), dtype=np.float32)
+        for out_index in np.ndindex(output_array.shape):
+            in_index = tuple(
+                min(
+                    int(out_index[axis] * value.shape[axis] / output_array.shape[axis]),
+                    value.shape[axis] - 1,
+                )
+                for axis in range(value.ndim)
+            )
+            output_array[out_index] = value[in_index]
+        _write_node_output(device, output, layout, output_array)
+        return
+
+    if op == Op.SOFTMAX:
+        value = _read_node_input(device, node.inputs[0], layout)
+        axis = int(node.attrs.get("axis", -1))
+        shifted = value - np.max(value, axis=axis, keepdims=True)
+        exp = np.exp(shifted)
+        _write_node_output(
+            device, output, layout, exp / np.sum(exp, axis=axis, keepdims=True)
+        )
+        return
+
+    if op == Op.MASKED_SOFTMAX:
+        logits = _read_node_input(device, node.inputs[0], layout)
+        mask = _read_node_input(device, node.inputs[1], layout)
+        axis = int(node.attrs.get("axis", -1))
+        shifted = np.where(mask == 0, -1e30, logits)
+        shifted = shifted - np.max(shifted, axis=axis, keepdims=True)
+        exp = np.exp(shifted)
+        _write_node_output(
+            device, output, layout, exp / np.sum(exp, axis=axis, keepdims=True)
+        )
+        return
+
+    if op == Op.LAYER_NORM:
+        value = _read_node_input(device, node.inputs[0], layout)
+        weight = _read_node_input(device, node.inputs[1], layout)
+        bias = _read_node_input(device, node.inputs[2], layout)
+        eps = float(node.attrs.get("epsilon", 1e-5))
+        mean = value.mean(axis=-1, keepdims=True)
+        var = value.var(axis=-1, keepdims=True)
+        normalized = (value - mean) / np.sqrt(var + eps)
+        _write_node_output(device, output, layout, normalized * weight + bias)
+        return
+
+    if op == Op.RMS_NORM:
+        value = _read_node_input(device, node.inputs[0], layout)
+        weight = _read_node_input(device, node.inputs[1], layout)
+        eps = float(node.attrs.get("epsilon", 1e-5))
+        rms = np.sqrt(np.mean(value * value, axis=-1, keepdims=True) + eps)
+        _write_node_output(device, output, layout, value / rms * weight)
+        return
+
+    if op == Op.CAUSAL_MASK:
+        batch = int(node.attrs.get("batch", 1))
+        query_len = int(node.attrs.get("query_len"))
+        key_len = int(node.attrs.get("key_len"))
+        mask = np.tril(np.ones((query_len, key_len), dtype=np.float32))
+        mask = mask.reshape(1, 1, query_len, key_len).repeat(batch, axis=0)
+        _write_node_output(device, output, layout, mask)
+        return
+
+    if op == Op.ROPE:
+        x = _read_node_input(device, node.inputs[0], layout)
+        cos = _read_node_input(device, node.inputs[1], layout)
+        sin = _read_node_input(device, node.inputs[2], layout)
+        x0 = x[..., 0::2]
+        x1 = x[..., 1::2]
+        out = np.empty_like(x)
+        out[..., 0::2] = x0 * cos - x1 * sin
+        out[..., 1::2] = x0 * sin + x1 * cos
+        _write_node_output(device, output, layout, out)
+        return
+
+    if op == Op.KV_CACHE_APPEND:
+        cache = _read_node_input(device, node.inputs[0], layout)
+        value = _read_node_input(device, node.inputs[1], layout)
+        position = int(node.attrs.get("position", 0))
+        cache[:, :, position, :] = value
+        _write_node_output(device, output, layout, cache)
+        return
+
+    if op == Op.KV_CACHE_GATHER:
+        cache = _read_node_input(device, node.inputs[0], layout)
+        positions = _read_node_input(device, node.inputs[1], layout).astype(int)
+        gathered = np.stack(
+            [cache[:, :, positions[:, i], :] for i in range(positions.shape[1])],
+            axis=2,
+        )
+        _write_node_output(device, output, layout, gathered)
+        return
+
+    if op in {Op.SCALED_DOT_PRODUCT_ATTENTION, Op.MASKED_ATTENTION}:
+        q = _read_node_input(device, node.inputs[0], layout)
+        k = _read_node_input(device, node.inputs[1], layout)
+        v = _read_node_input(device, node.inputs[2], layout)
+        scale = float(node.attrs.get("scale", q.shape[-1] ** 0.5))
+        scores = np.matmul(q, np.swapaxes(k, -1, -2)) / scale
+        if op == Op.MASKED_ATTENTION:
+            mask = _read_node_input(device, node.inputs[3], layout)
+            scores = np.where(mask == 0, -1e30, scores)
+        scores = scores - np.max(scores, axis=-1, keepdims=True)
+        weights = np.exp(scores)
+        weights = weights / np.sum(weights, axis=-1, keepdims=True)
+        _write_node_output(device, output, layout, np.matmul(weights, v))
+        return
+
+    raise NotImplementedError(f"no software implementation for {op.value!r}")
