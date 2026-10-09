@@ -7,12 +7,14 @@
 Working tree is clean. The most recent commit is:
 
 ```text
-6e93fc6 Use project-local ResNet18 cache
+53149d1 Add C++ simulator plan
 ```
 
 The surrounding ResNet18 phase commits are:
 
 ```text
+53149d1 Add C++ simulator plan
+6e93fc6 Use project-local ResNet18 cache
 2a1f581 Implement ResNet18 phase E gates and tolerances
 a07fe60 Implement ResNet18 phase D end-to-end path
 5b8d880 Implement ResNet18 phase C model memory planning
@@ -44,6 +46,21 @@ by default because the Python functional simulator is too slow. To run it:
 MGPU_FULL_RESNET18=1 python -m unittest \
   tests.model_e2e.test_real_cnn_execution.TestRealCNNExecution.test_full_resnet18_forward_runs_in_simulator
 ```
+
+An attempted opt-in run remained CPU-bound in `hw/core.py:_alu` for over seven
+minutes and was interrupted. A C++ simulator plan has been created to remove
+this blocker; see `docs/cpp-simulator-plan.md`.
+
+## C++ simulator
+
+`docs/cpp-simulator-plan.md` defines the next major performance work:
+
+- C++ ISA parser matching `hw/isa.py`
+- typed C++ memory subsystem
+- SIMT execution core and wave scheduler
+- timing/profile counter parity
+- pybind11 wrapper behind the existing `hw.device` API
+- full ResNet18 224x224 validation with `MGPU_CPP_SIM=1`
 
 ## Verification commands
 
@@ -94,6 +111,7 @@ GPT-2-small is also cached at:
 - `docs/resnet18-run-plan.md`
 - `docs/gpt2-small-run-plan.md`
 - `docs/next-stage-steps.md`
+- `docs/cpp-simulator-plan.md`
 - `compiler/mlir/mgpu_runner.py`
 - `compiler/frontends/torch_fx_frontend.py`
 - `compiler/mlir/mlir_builder.py`
@@ -107,9 +125,10 @@ GPT-2-small is also cached at:
 
 ## Likely next work
 
-1. Run and debug the opt-in full ResNet18 224x224 forward if full numerical
-   validation is needed.
-2. Continue the GPT-2-small plan in `docs/gpt2-small-run-plan.md`, especially
+1. Start `docs/cpp-simulator-plan.md` Phase 0: C++ ISA parser.
+2. Run and debug the opt-in full ResNet18 224x224 forward after the C++
+   simulator becomes available.
+3. Continue the GPT-2-small plan in `docs/gpt2-small-run-plan.md`, especially
    multi-head attention and KV-cache execution.
-3. Continue hardware-scaling work documented in the hardware-scaling and
+4. Continue hardware-scaling work documented in the hardware-scaling and
    next-stage plans.
