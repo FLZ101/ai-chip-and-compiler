@@ -153,7 +153,7 @@ class TestAttentionKernels(unittest.TestCase):
         )
         np.testing.assert_array_equal(result.outputs[0], expected)
 
-    def test_large_masked_attention_scalar_loop(self):
+    def test_large_masked_attention_tiled(self):
         rng = np.random.default_rng(31)
         q = rng.normal(size=(1, 1, 8, 64)).astype(np.float32)
         k = rng.normal(size=(1, 1, 8, 64)).astype(np.float32)
@@ -176,7 +176,7 @@ class TestAttentionKernels(unittest.TestCase):
             rtol=1e-3,
             atol=1e-3,
         )
-        self.assertIn("dot3_loop", result.isa_text)
+        self.assertIn("mapped_softmax_row_loop", result.isa_text)
 
 
 if __name__ == "__main__":

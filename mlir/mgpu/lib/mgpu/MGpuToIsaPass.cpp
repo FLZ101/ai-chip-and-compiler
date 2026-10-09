@@ -5245,10 +5245,6 @@ struct MGpuToIsaPass
       return std::nullopt;
     if (qType.getRank() == 4 && kType.getRank() == 4 &&
         vType.getRank() == 4 && outputType.getRank() == 4) {
-      if (emitAttentionTiledStage) {
-        if (auto fullIsa = emitMappedAttentionFullIsa(attention))
-          return fullIsa;
-      }
       if (emitAttentionSoftmaxStage) {
         if (auto softmaxIsa = emitTiledAttentionSoftmaxIsa(attention))
           return softmaxIsa;
@@ -5257,10 +5253,9 @@ struct MGpuToIsaPass
         if (auto scoreIsa = emitTiledAttentionScoreIsa(attention))
           return scoreIsa;
       }
-      int64_t seq = qType.getShape()[2];
-      int64_t dim = qType.getShape()[3];
-      if (seq > 16 || dim > 16)
-        return emitScalarAttentionIsa(attention);
+      if (auto fullIsa = emitMappedAttentionFullIsa(attention))
+        return fullIsa;
+      return emitScalarAttentionIsa(attention);
     }
     if ((qType.getRank() != 2 && qType.getRank() != 4) ||
         kType.getRank() != qType.getRank() ||
