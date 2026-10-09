@@ -153,6 +153,31 @@ class TestAttentionKernels(unittest.TestCase):
         )
         np.testing.assert_array_equal(result.outputs[0], expected)
 
+    def test_large_masked_attention_scalar_loop(self):
+        rng = np.random.default_rng(31)
+        q = rng.normal(size=(1, 1, 8, 64)).astype(np.float32)
+        k = rng.normal(size=(1, 1, 8, 64)).astype(np.float32)
+        v = rng.normal(size=(1, 1, 8, 64)).astype(np.float32)
+        mask = np.tril(np.ones((8, 8), dtype=np.float32)).reshape(1, 1, 8, 8)
+        scale = 1.0 / np.sqrt(64.0)
+        frontend = ManualFrontend("large_masked_attention")
+        qv = frontend.add_input("q", DType.F32, q.shape)
+        kv = frontend.add_input("k", DType.F32, k.shape)
+        vv = frontend.add_input("v", DType.F32, v.shape)
+        mv = frontend.add_input("mask", DType.F32, mask.shape)
+        frontend.output(frontend.masked_attention(qv, kv, vv, mv, scale=scale))
+
+        result = run_operator_e2e(
+            make_device(global_size=1 << 22, sm_count=4),
+            frontend.build(),
+            {"q": q, "k": k, "v": v, "mask": mask},
+            [_attention_reference(q, k, v, scale, mask)],
+            lowering=lower_kernel,
+            rtol=1e-3,
+            atol=1e-3,
+        )
+        self.assertIn("dot3_loop", result.isa_text)
+
 
 if __name__ == "__main__":
     unittest.main()

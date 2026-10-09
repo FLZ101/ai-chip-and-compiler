@@ -4129,6 +4129,206 @@ struct MGpuToIsaPass
     }
   }
 
+  std::optional<IsaText> emitScalarAttentionIsa(mgpu::AttentionOp attention) {
+    auto qType = dyn_cast<MemRefType>(attention.getQ().getType());
+    auto kType = dyn_cast<MemRefType>(attention.getK().getType());
+    auto vType = dyn_cast<MemRefType>(attention.getV().getType());
+    auto outputType = dyn_cast<MemRefType>(attention.getOutput().getType());
+    if (!qType || !kType || !vType || !outputType || qType.getRank() != 4 ||
+        kType.getRank() != 4 || vType.getRank() != 4 ||
+        outputType.getRank() != 4)
+      return std::nullopt;
+
+    int64_t batch = qType.getShape()[0];
+    int64_t heads = qType.getShape()[1];
+    int64_t seq = qType.getShape()[2];
+    int64_t dim = qType.getShape()[3];
+    if (batch != 1)
+      return std::nullopt;
+
+    double scale = attention.getScale().convertToDouble();
+    bool masked = attention.getMasked();
+    int64_t qBase = bufferMap.base(attention.getQ());
+    int64_t kBase = bufferMap.base(attention.getK());
+    int64_t vBase = bufferMap.base(attention.getV());
+    int64_t maskBase = bufferMap.base(attention.getMask());
+    int64_t outBase = bufferMap.base(attention.getOutput());
+    int64_t total = heads * seq * dim;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, total);
+
+    os << "IDIV R1, R0, " << (seq * dim) << "\n"
+       << "MUL R4, R1, " << (seq * dim) << "\n"
+       << "SUB R5, R0, R4\n"
+       << "IDIV R2, R5, " << dim << "\n"
+       << "MUL R6, R2, " << dim << "\n"
+       << "SUB R3, R5, R6\n";
+
+    // Pass 1: max score.
+    os << "MOV R20, -1.0e30\n"
+       << "MOV R21, 0\n"
+       << "max_loop:\n"
+       << "CMP.LT R22, R21, " << seq << "\n"
+       << "BRA max_body, R22, max_end\n"
+       << "BRA max_end\n"
+       << "max_body:\n"
+       << "MOV R23, 0\n"
+       << "MOV R24, 0\n"
+       << "dot1_loop:\n"
+       << "CMP.LT R25, R24, " << dim << "\n"
+       << "BRA dot1_body, R25, dot1_end\n"
+       << "BRA dot1_end\n"
+       << "dot1_body:\n"
+       << "MOV R26, " << dim << "\n"
+       << "MUL R26, R2, R26\n"
+       << "ADD R26, R26, R24\n"
+       << "MUL R26, R26, 4\n"
+       << "ADD R26, R26, " << qBase << "\n"
+       << "LDG R27, [R26]\n"
+       << "MOV R28, " << dim << "\n"
+       << "MUL R28, R21, R28\n"
+       << "ADD R28, R28, R24\n"
+       << "MUL R28, R28, 4\n"
+       << "ADD R28, R28, " << kBase << "\n"
+       << "LDG R29, [R28]\n"
+       << "FMA R23, R27, R29, R23\n"
+       << "ADD R24, R24, 1\n"
+       << "BRA dot1_loop\n"
+       << "dot1_end:\n";
+    if (masked) {
+      os << "CMP.LE R26, R21, R2\n"
+         << "MOV R27, 0\n"
+         << "MOV R28, -1.0e30\n"
+         << "SEL R29, R26, R27, R28\n";
+    } else {
+      os << "MOV R29, 0\n";
+    }
+    os << "MUL R30, R23, " << scale << "\n"
+       << "ADD R30, R30, R29\n"
+       << "MAX R20, R20, R30\n"
+       << "ADD R21, R21, 1\n"
+       << "BRA max_loop\n"
+       << "max_end:\n";
+
+    // Pass 2: denominator sum exp.
+    os << "MOV R21, 0\n"
+       << "MOV R31, 0\n"
+       << "sum_loop:\n"
+       << "CMP.LT R22, R21, " << seq << "\n"
+       << "BRA sum_body, R22, sum_end\n"
+       << "BRA sum_end\n"
+       << "sum_body:\n"
+       << "MOV R23, 0\n"
+       << "MOV R24, 0\n"
+       << "dot2_loop:\n"
+       << "CMP.LT R25, R24, " << dim << "\n"
+       << "BRA dot2_body, R25, dot2_end\n"
+       << "BRA dot2_end\n"
+       << "dot2_body:\n"
+       << "MOV R26, " << dim << "\n"
+       << "MUL R26, R2, R26\n"
+       << "ADD R26, R26, R24\n"
+       << "MUL R26, R26, 4\n"
+       << "ADD R26, R26, " << qBase << "\n"
+       << "LDG R27, [R26]\n"
+       << "MOV R28, " << dim << "\n"
+       << "MUL R28, R21, R28\n"
+       << "ADD R28, R28, R24\n"
+       << "MUL R28, R28, 4\n"
+       << "ADD R28, R28, " << kBase << "\n"
+       << "LDG R29, [R28]\n"
+       << "FMA R23, R27, R29, R23\n"
+       << "ADD R24, R24, 1\n"
+       << "BRA dot2_loop\n"
+       << "dot2_end:\n";
+    if (masked) {
+      os << "CMP.LE R26, R21, R2\n"
+         << "MOV R27, 0\n"
+         << "MOV R28, -1.0e30\n"
+         << "SEL R29, R26, R27, R28\n";
+    } else {
+      os << "MOV R29, 0\n";
+    }
+    os << "MUL R30, R23, " << scale << "\n"
+       << "ADD R30, R30, R29\n"
+       << "SUB R30, R30, R20\n"
+       << "MUL R32, R30, 1.4426950408889634\n"
+       << "EXP2 R33, R32\n"
+       << "ADD R31, R31, R33\n"
+       << "ADD R21, R21, 1\n"
+       << "BRA sum_loop\n"
+       << "sum_end:\n";
+
+    // Output for this thread's dim index.
+    os << "MOV R21, 0\n"
+       << "MOV R34, 0\n"
+       << "out_loop:\n"
+       << "CMP.LT R22, R21, " << seq << "\n"
+       << "BRA out_body, R22, out_end\n"
+       << "BRA out_end\n"
+       << "out_body:\n"
+       << "MOV R23, 0\n"
+       << "MOV R24, 0\n"
+       << "dot3_loop:\n"
+       << "CMP.LT R25, R24, " << dim << "\n"
+       << "BRA dot3_body, R25, dot3_end\n"
+       << "BRA dot3_end\n"
+       << "dot3_body:\n"
+       << "MOV R26, " << dim << "\n"
+       << "MUL R26, R2, R26\n"
+       << "ADD R26, R26, R24\n"
+       << "MUL R26, R26, 4\n"
+       << "ADD R26, R26, " << qBase << "\n"
+       << "LDG R27, [R26]\n"
+       << "MOV R28, " << dim << "\n"
+       << "MUL R28, R21, R28\n"
+       << "ADD R28, R28, R24\n"
+       << "MUL R28, R28, 4\n"
+       << "ADD R28, R28, " << kBase << "\n"
+       << "LDG R29, [R28]\n"
+       << "FMA R23, R27, R29, R23\n"
+       << "ADD R24, R24, 1\n"
+       << "BRA dot3_loop\n"
+       << "dot3_end:\n";
+    if (masked) {
+      os << "CMP.LE R26, R21, R2\n"
+         << "MOV R27, 0\n"
+         << "MOV R28, -1.0e30\n"
+         << "SEL R29, R26, R27, R28\n";
+    } else {
+      os << "MOV R29, 0\n";
+    }
+    os << "MUL R30, R23, " << scale << "\n"
+       << "ADD R30, R30, R29\n"
+       << "SUB R30, R30, R20\n"
+       << "MUL R32, R30, 1.4426950408889634\n"
+       << "EXP2 R33, R32\n"
+       << "DIV R33, R33, R31\n"
+       << "MOV R35, " << dim << "\n"
+       << "MUL R35, R21, R35\n"
+       << "ADD R35, R35, R3\n"
+       << "MUL R35, R35, 4\n"
+       << "ADD R35, R35, " << vBase << "\n"
+       << "LDG R36, [R35]\n"
+       << "FMA R34, R33, R36, R34\n"
+       << "ADD R21, R21, 1\n"
+       << "BRA out_loop\n"
+       << "out_end:\n"
+       << "MUL R37, R0, 4\n"
+       << "ADD R37, R37, " << outBase << "\n"
+       << "STG [R37], R34\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText result;
+    result.code = code;
+    result.grid = std::to_string((total + 31) / 32) + "x1x1";
+    result.block = "32x1x1";
+    return result;
+  }
+
   std::optional<IsaText> emitAttentionIsa(mgpu::LaunchOp launch) {
     SmallVector<mgpu::AttentionOp> attentions;
     launch.getBody().front().walk(
@@ -4143,6 +4343,13 @@ struct MGpuToIsaPass
     auto outputType = dyn_cast<MemRefType>(attention.getOutput().getType());
     if (!qType || !kType || !vType || !outputType)
       return std::nullopt;
+    if (qType.getRank() == 4 && kType.getRank() == 4 &&
+        vType.getRank() == 4 && outputType.getRank() == 4) {
+      int64_t seq = qType.getShape()[2];
+      int64_t dim = qType.getShape()[3];
+      if (seq > 16 || dim > 16)
+        return emitScalarAttentionIsa(attention);
+    }
     if ((qType.getRank() != 2 && qType.getRank() != 4) ||
         kType.getRank() != qType.getRank() ||
         vType.getRank() != qType.getRank() ||
