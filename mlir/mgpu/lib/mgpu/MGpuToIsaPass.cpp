@@ -1776,12 +1776,12 @@ struct MGpuToIsaPass
     int64_t w = xType.getShape()[3];
     int64_t hw = h * w;
     int64_t total = c * hw;
-    int64_t xBase = 0;
-    int64_t scaleBase = memrefByteSize(xType);
-    int64_t biasBase = scaleBase + memrefByteSize(scaleType);
-    int64_t meanBase = biasBase + memrefByteSize(biasType);
-    int64_t varBase = meanBase + memrefByteSize(meanType);
-    int64_t outBase = varBase + memrefByteSize(varType);
+    int64_t xBase = bufferMap.base(op.getX());
+    int64_t scaleBase = bufferMap.base(op.getScale());
+    int64_t biasBase = bufferMap.base(op.getBias());
+    int64_t meanBase = bufferMap.base(op.getMean());
+    int64_t varBase = bufferMap.base(op.getVar());
+    int64_t outBase = bufferMap.base(op.getOutput());
     double eps = 1e-5;
 
     std::string code;
@@ -1849,10 +1849,10 @@ struct MGpuToIsaPass
     int64_t hw = h * w;
     int64_t count = channelsPerGroup * hw;
     int64_t total = c * hw;
-    int64_t xBase = 0;
-    int64_t weightBase = memrefByteSize(xType);
-    int64_t biasBase = weightBase + memrefByteSize(weightType);
-    int64_t outBase = biasBase + memrefByteSize(biasType);
+    int64_t xBase = bufferMap.base(op.getX());
+    int64_t weightBase = bufferMap.base(op.getWeight());
+    int64_t biasBase = bufferMap.base(op.getBias());
+    int64_t outBase = bufferMap.base(op.getOutput());
     double eps = 1e-5;
 
     std::string code;
@@ -1940,9 +1940,9 @@ struct MGpuToIsaPass
       return std::nullopt;
     int64_t n = boxesType.getShape()[0];
     int64_t total = n * 4;
-    int64_t boxesBase = 0;
-    int64_t deltasBase = memrefByteSize(boxesType);
-    int64_t outBase = deltasBase + memrefByteSize(deltasType);
+    int64_t boxesBase = bufferMap.base(op.getBoxes());
+    int64_t deltasBase = bufferMap.base(op.getDeltas());
+    int64_t outBase = bufferMap.base(op.getOutput());
 
     std::string code;
     llvm::raw_string_ostream os(code);
@@ -2019,9 +2019,9 @@ struct MGpuToIsaPass
         boxesType.getShape()[1] != 4 || scoresType.getRank() != 1)
       return std::nullopt;
     int64_t numBoxes = boxesType.getShape()[0];
-    int64_t boxesBase = 0;
-    int64_t scoresBase = memrefByteSize(boxesType);
-    int64_t outBase = scoresBase + memrefByteSize(scoresType);
+    int64_t boxesBase = bufferMap.base(op.getBoxes());
+    int64_t scoresBase = bufferMap.base(op.getScores());
+    int64_t outBase = bufferMap.base(op.getOutput());
     double threshold = op.getIouThreshold().convertToDouble();
 
     std::string code;
