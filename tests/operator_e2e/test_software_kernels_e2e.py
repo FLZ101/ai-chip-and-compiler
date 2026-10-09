@@ -295,6 +295,42 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
         expected = image.repeat(2, axis=2).repeat(2, axis=3)
         self._assert_equivalent(frontend.build(), {"x": image}, expected)
 
+    def test_transpose_software_matches_mgpu(self):
+        image = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        frontend = ManualFrontend("transpose")
+        x = frontend.add_input("x", DType.F32, image.shape)
+        frontend.output(frontend.transpose(x, (1, 0, 2)))
+        self._assert_equivalent(
+            frontend.build(), {"x": image}, np.transpose(image, (1, 0, 2))
+        )
+
+    def test_concat_software_matches_mgpu(self):
+        a = np.arange(6, dtype=np.float32).reshape(2, 3)
+        b = np.arange(6, 12, dtype=np.float32).reshape(2, 3)
+        frontend = ManualFrontend("concat")
+        x = frontend.add_input("a", DType.F32, a.shape)
+        y = frontend.add_input("b", DType.F32, b.shape)
+        frontend.output(frontend.concat(x, y, axis=0))
+        self._assert_equivalent(
+            frontend.build(), {"a": a, "b": b}, np.concatenate([a, b], axis=0)
+        )
+
+    def test_rope_software_matches_mgpu(self):
+        x = np.arange(16, dtype=np.float32).reshape(1, 1, 2, 8)
+        cos = np.ones((1, 1, 2, 4), dtype=np.float32)
+        sin = np.ones((1, 1, 2, 4), dtype=np.float32)
+        frontend = ManualFrontend("rope")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        c = frontend.add_input("cos", DType.F32, cos.shape)
+        s = frontend.add_input("sin", DType.F32, sin.shape)
+        frontend.output(frontend.rope(value, c, s))
+        x0 = x[..., 0::2]
+        x1 = x[..., 1::2]
+        out = np.empty_like(x)
+        out[..., 0::2] = x0 * cos - x1 * sin
+        out[..., 1::2] = x0 * sin + x1 * cos
+        self._assert_equivalent(frontend.build(), {"x": x, "cos": cos, "sin": sin}, out)
+
     def test_softmax_software_matches_mgpu(self):
         logits = np.asarray([[1.0, 2.0, 3.0], [1.0, 0.0, -1.0]], dtype=np.float32)
         frontend = ManualFrontend("softmax")

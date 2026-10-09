@@ -2,7 +2,7 @@
 // CHECK: func.func @rope
 // CHECK: "mgpu.isa"()
 // CHECK-SAME: code = "MOV R0, ctaid.x
-// CHECK-SAME: SEL R23, R22, R18, R21
+// CHECK-SAME: SEL R24, R23, R19, R22
 
 module {
   func.func @rope(%arg0: memref<2x4xf32>, %arg1: memref<2x4xf32>, %arg2: memref<2x4xf32>) -> memref<2x4xf32> {

@@ -1701,12 +1701,24 @@ struct MGpuToIsaPass
     auto cosType = dyn_cast<MemRefType>(op.getCos().getType());
     auto sinType = dyn_cast<MemRefType>(op.getSin().getType());
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
-    if (!xType || !cosType || !sinType || !outType || xType.getRank() != 2)
+    if (!xType || !cosType || !sinType || !outType || xType.getRank() < 1 ||
+        xType.getRank() > 4)
       return std::nullopt;
 
-    int64_t rows = xType.getShape()[0];
-    int64_t dim = xType.getShape()[1];
-    int64_t total = rows * dim;
+    int64_t total = 1;
+    for (int64_t dim : xType.getShape())
+      total *= dim;
+    int64_t dim = xType.getShape().back();
+    if (dim % 2 != 0)
+      return std::nullopt;
+    int64_t leading = total / dim;
+    int64_t cosDim = cosType.getNumElements() / leading;
+    int64_t sinDim = sinType.getNumElements() / leading;
+    if ((cosDim != dim && cosDim != dim / 2) ||
+        (sinDim != dim && sinDim != dim / 2))
+      return std::nullopt;
+    int64_t cosPairStride = cosDim == dim ? 2 : 1;
+    int64_t sinPairStride = sinDim == dim ? 2 : 1;
     int64_t xBase = bufferMap.base(op.getX());
     int64_t cosBase = bufferMap.base(op.getCos());
     int64_t sinBase = bufferMap.base(op.getSin());
@@ -1721,31 +1733,36 @@ struct MGpuToIsaPass
        << "IDIV R4, R3, 2\n"
        << "MUL R5, R4, 2\n"
        << "SUB R6, R3, R5\n"
-       << "MOV R7, " << dim << "\n"
-       << "MUL R7, R1, R7\n"
+       << "MUL R7, R1, " << dim << "\n"
        << "ADD R7, R7, R5\n"
        << "MUL R7, R7, 4\n"
        << "ADD R7, R7, " << xBase << "\n"
        << "LDG R9, [R7]\n"
        << "ADD R10, R7, 4\n"
        << "LDG R11, [R10]\n"
-       << "SUB R12, R7, " << xBase << "\n"
+       << "MUL R12, R1, " << cosDim << "\n"
+       << "MUL R13, R4, " << cosPairStride << "\n"
+       << "ADD R12, R12, R13\n"
+       << "MUL R12, R12, 4\n"
        << "ADD R12, R12, " << cosBase << "\n"
        << "LDG R14, [R12]\n"
-       << "SUB R12, R7, " << xBase << "\n"
-       << "ADD R12, R12, " << sinBase << "\n"
-       << "LDG R15, [R12]\n"
-       << "MUL R16, R9, R14\n"
-       << "MUL R17, R11, R15\n"
-       << "SUB R18, R16, R17\n"
-       << "MUL R19, R9, R15\n"
-       << "MUL R20, R11, R14\n"
-       << "ADD R21, R19, R20\n"
-       << "CMP.EQ R22, R6, 0\n"
-       << "SEL R23, R22, R18, R21\n"
-       << "MUL R24, R0, 4\n"
-       << "ADD R24, R24, " << outBase << "\n"
-       << "STG [R24], R23\n";
+       << "MUL R15, R1, " << sinDim << "\n"
+       << "MUL R16, R4, " << sinPairStride << "\n"
+       << "ADD R15, R15, R16\n"
+       << "MUL R15, R15, 4\n"
+       << "ADD R15, R15, " << sinBase << "\n"
+       << "LDG R16, [R15]\n"
+       << "MUL R17, R9, R14\n"
+       << "MUL R18, R11, R16\n"
+       << "SUB R19, R17, R18\n"
+       << "MUL R20, R9, R16\n"
+       << "MUL R21, R11, R14\n"
+       << "ADD R22, R20, R21\n"
+       << "CMP.EQ R23, R6, 0\n"
+       << "SEL R24, R23, R19, R22\n"
+       << "MUL R25, R0, 4\n"
+       << "ADD R25, R25, " << outBase << "\n"
+       << "STG [R25], R24\n";
     emitCnnFinish(os);
     os.flush();
 
@@ -2254,35 +2271,74 @@ struct MGpuToIsaPass
 
     auto inputType = dyn_cast<MemRefType>(ops.front().getInput().getType());
     auto outType = dyn_cast<MemRefType>(ops.front().getOutput().getType());
-    if (!inputType || !outType || inputType.getRank() != 2 ||
-        outType.getRank() != 2)
+    if (!inputType || !outType || inputType.getRank() != outType.getRank() ||
+        inputType.getRank() < 2 || inputType.getRank() > 3)
       return std::nullopt;
-    int64_t rows = inputType.getShape()[0];
-    int64_t cols = inputType.getShape()[1];
+    int64_t rank = inputType.getRank();
+    SmallVector<int64_t> outputAxisForInput;
+    for (int64_t inAxis = 0; inAxis < rank; ++inAxis) {
+      int64_t found = -1;
+      for (int64_t outAxis = 0; outAxis < rank; ++outAxis) {
+        if (inputType.getShape()[inAxis] == outType.getShape()[outAxis]) {
+          found = outAxis;
+          break;
+        }
+      }
+      if (found == -1)
+        return std::nullopt;
+      outputAxisForInput.push_back(found);
+    }
     int64_t inputBase = bufferMap.base(ops.front().getInput());
     int64_t outBase = bufferMap.base(ops.front().getOutput());
+    int64_t total = 1;
+    for (int64_t dim : outType.getShape())
+      total *= dim;
 
     std::string code;
     llvm::raw_string_ostream os(code);
-    os << "MOV R0, tid.x\n"
-       << "MOV R1, tid.y\n"
-       << "MUL R2, R0, " << cols << "\n"
-       << "ADD R2, R2, R1\n"
-       << "MUL R2, R2, 4\n"
-       << "ADD R2, R2, " << inputBase << "\n"
-       << "LDG R4, [R2]\n"
-       << "MUL R5, R1, " << rows << "\n"
-       << "ADD R5, R5, R0\n"
-       << "MUL R5, R5, 4\n"
-       << "ADD R5, R5, " << outBase << "\n"
-       << "STG [R5], R4\n"
-       << "EXIT\n";
+    emitCnnPrologue(os, total);
+    if (rank == 2) {
+      os << "IDIV R1, R0, " << outType.getShape()[1] << "\n"
+         << "MUL R2, R1, " << outType.getShape()[1] << "\n"
+         << "SUB R3, R0, R2\n";
+    } else {
+      int64_t mid = outType.getShape()[1] * outType.getShape()[2];
+      os << "IDIV R1, R0, " << mid << "\n"
+         << "MUL R2, R1, " << mid << "\n"
+         << "SUB R4, R0, R2\n"
+         << "IDIV R3, R4, " << outType.getShape()[2] << "\n"
+         << "MUL R5, R3, " << outType.getShape()[2] << "\n"
+         << "SUB R6, R4, R5\n";
+    }
+    os << "MOV R20, 0\n";
+    for (int64_t inAxis = 0; inAxis < rank; ++inAxis) {
+      int64_t outAxis = outputAxisForInput[inAxis];
+      int64_t stride = 1;
+      for (int64_t next = inAxis + 1; next < rank; ++next)
+        stride *= inputType.getShape()[next];
+      std::string outReg = rank == 2 ? (outAxis == 0 ? "R1" : "R3")
+                                     : (outAxis == 0 ? "R1"
+                                                     : outAxis == 1 ? "R3"
+                                                                    : "R6");
+      if (stride != 1)
+        os << "MUL R21, " << outReg << ", " << stride << "\n"
+           << "ADD R20, R20, R21\n";
+      else
+        os << "ADD R20, R20, " << outReg << "\n";
+    }
+    os << "MUL R20, R20, 4\n"
+       << "ADD R20, R20, " << inputBase << "\n"
+       << "LDG R21, [R20]\n"
+       << "MUL R22, R0, 4\n"
+       << "ADD R22, R22, " << outBase << "\n"
+       << "STG [R22], R21\n";
+    emitCnnFinish(os);
     os.flush();
 
     IsaText isa;
     isa.code = code;
-    isa.grid = "1x1x1";
-    isa.block = std::to_string(rows) + "x" + std::to_string(cols) + "x1";
+    isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
     return isa;
   }
 
@@ -2296,12 +2352,34 @@ struct MGpuToIsaPass
     auto firstType = dyn_cast<MemRefType>(op.getFirst().getType());
     auto secondType = dyn_cast<MemRefType>(op.getSecond().getType());
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
-    if (!firstType || !secondType || !outType || firstType.getRank() != 1 ||
-        secondType.getRank() != 1 || outType.getRank() != 1)
+    if (!firstType || !secondType || !outType ||
+        firstType.getRank() != secondType.getRank() ||
+        firstType.getRank() != outType.getRank() ||
+        firstType.getRank() < 1 || firstType.getRank() > 3)
       return std::nullopt;
-    int64_t firstLen = firstType.getShape()[0];
-    int64_t secondLen = secondType.getShape()[0];
-    int64_t n = outType.getShape()[0];
+    int64_t rank = firstType.getRank();
+    int64_t axis = -1;
+    for (int64_t a = 0; a < rank; ++a) {
+      bool matches = true;
+      for (int64_t d = 0; d < rank; ++d) {
+        int64_t expected = d == a
+                               ? firstType.getShape()[d] +
+                                     secondType.getShape()[d]
+                               : firstType.getShape()[d];
+        if (expected != outType.getShape()[d]) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        axis = a;
+        break;
+      }
+    }
+    if (axis == -1)
+      return std::nullopt;
+    int64_t firstLen = firstType.getShape()[axis];
+    int64_t n = outType.getNumElements();
     int64_t firstBase = bufferMap.base(op.getFirst());
     int64_t secondBase = bufferMap.base(op.getSecond());
     int64_t outBase = bufferMap.base(op.getOutput());
@@ -2309,27 +2387,57 @@ struct MGpuToIsaPass
     std::string code;
     llvm::raw_string_ostream os(code);
     emitCnnPrologue(os, n);
-    os << "MOV R2, " << firstLen << "\n"
-       << "CMP.LT R3, R0, R2\n"
-       << "BRA first, R3, end\n"
-       << "BRA second\n"
-       << "first:\n"
-       << "MUL R4, R0, 4\n"
-       << "ADD R4, R4, " << firstBase << "\n"
-       << "LDG R6, [R4]\n"
-       << "BRA store\n"
-       << "second:\n"
-       << "MOV R4, R0\n"
-       << "MOV R5, " << firstLen << "\n"
-       << "SUB R4, R4, R5\n"
-       << "MUL R4, R4, 4\n"
-       << "ADD R4, R4, " << secondBase << "\n"
-       << "LDG R6, [R4]\n"
-       << "BRA store\n"
-       << "store:\n"
-       << "MUL R7, R0, 4\n"
-       << "ADD R7, R7, " << outBase << "\n"
-       << "STG [R7], R6\n";
+    if (rank == 1) {
+      os << "MOV R2, " << firstLen << "\n"
+         << "CMP.LT R3, R0, R2\n"
+         << "BRA first, R3, end\n"
+         << "BRA second\n"
+         << "first:\n"
+         << "MUL R4, R0, 4\n"
+         << "ADD R4, R4, " << firstBase << "\n"
+         << "LDG R6, [R4]\n"
+         << "BRA store\n"
+         << "second:\n"
+         << "MOV R4, R0\n"
+         << "MOV R5, " << firstLen << "\n"
+         << "SUB R4, R4, R5\n"
+         << "MUL R4, R4, 4\n"
+         << "ADD R4, R4, " << secondBase << "\n"
+         << "LDG R6, [R4]\n"
+         << "BRA store\n"
+         << "store:\n"
+         << "MUL R7, R0, 4\n"
+         << "ADD R7, R7, " << outBase << "\n"
+         << "STG [R7], R6\n";
+    } else if (rank == 2) {
+      int64_t cols = outType.getShape()[1];
+      os << "IDIV R1, R0, " << cols << "\n"
+         << "MUL R2, R1, " << cols << "\n"
+         << "SUB R3, R0, R2\n";
+      std::string outAxisReg = axis == 0 ? "R1" : "R3";
+      os << "MOV R20, " << firstLen << "\n"
+         << "CMP.LT R21, " << outAxisReg << ", R20\n"
+         << "MOV R22, " << firstBase << "\n"
+         << "MOV R23, " << secondBase << "\n"
+         << "SEL R24, R21, R22, R23\n"
+         << "MOV R25, " << outAxisReg << "\n"
+         << "SUB R26, R25, R20\n"
+         << "SEL R27, R21, R25, R26\n";
+      if (axis == 0)
+        os << "MUL R23, R27, " << cols << "\n"
+           << "ADD R23, R23, R3\n";
+      else
+        os << "MUL R23, R1, " << cols << "\n"
+           << "ADD R23, R23, R27\n";
+      os << "MUL R23, R23, 4\n"
+         << "ADD R23, R23, R24\n"
+         << "LDG R24, [R23]\n"
+         << "MUL R25, R0, 4\n"
+         << "ADD R25, R25, " << outBase << "\n"
+         << "STG [R25], R24\n";
+    } else {
+      return std::nullopt;
+    }
     emitCnnFinish(os);
     os.flush();
 
