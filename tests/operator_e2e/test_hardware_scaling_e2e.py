@@ -187,6 +187,28 @@ class TestHardwareScalingEndToEnd(unittest.TestCase):
         self.assertIn("ctaid.x", result.isa_text)
         self.assertIn("mat_loop", result.isa_text)
 
+    def test_linear_with_bias_runs_in_simulator(self):
+        x = np.arange(12, dtype=np.float32).reshape(3, 4)
+        w = np.arange(20, dtype=np.float32).reshape(5, 4)
+        b = np.arange(5, dtype=np.float32)
+        expected = x @ w.T + b
+
+        frontend = ManualFrontend("linear")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        weight = frontend.add_input("w", DType.F32, w.shape)
+        bias = frontend.add_input("b", DType.F32, b.shape)
+        frontend.output(frontend.linear(value, weight, bias))
+
+        result = run_operator_e2e(
+            create_device(global_size=1 << 20, sm_count=4),
+            frontend.build(),
+            {"x": x, "w": w, "b": b},
+            [expected],
+            lowering=lower_kernel,
+            atol=1e-5,
+        )
+        self.assertIn("linear_loop", result.isa_text)
+
 
 if __name__ == "__main__":
     unittest.main()

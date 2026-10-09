@@ -280,26 +280,24 @@ class MLIRBuilder:
     def _emit_linear_placeholder(
         self, node: Node, result_name: str, indent: str
     ) -> list[str]:
-        value = node.inputs[0]
+        value, weight = node.inputs[:2]
         output = node.outputs[0]
-        scalar_type = self._scalar_type(output.dtype)
         value_type = self._memref_type(value)
+        weight_type = self._memref_type(weight)
         out_type = self._memref_type(output)
-        dims = ", ".join(f"d{axis}" for axis in range(output.rank))
-        identity = f"affine_map<({dims}) -> ({dims})>"
-        input_map = f"affine_map<({dims}) -> (d0, 0, 0, 0)>"
-        iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
+        bias_name = (
+            self._value_names[node.inputs[2].name]
+            if len(node.inputs) == 3
+            else self._value_names[value.name]
+        )
+        bias_type = (
+            self._memref_type(node.inputs[2]) if len(node.inputs) == 3 else value_type
+        )
+        attr_text = "{hasBias}" if len(node.inputs) == 3 else "{}"
         return [
-            f"{indent}// Linear op is lowered by mgpu-to-isa; "
-            "linalg identity is a placeholder.",
-            f"{indent}{result_name} = linalg.generic {{",
-            f"{indent}  indexing_maps = [{identity}, {identity}]",
-            f"{indent}  iterator_types = [{iterator_types}]",
-            f"{indent}}} ins({self._value_names[value.name]} : {value_type}) "
-            f"outs({result_name} : {out_type}) {{",
-            f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
-            f"{indent}  linalg.yield %in : {scalar_type}",
-            f"{indent}}} -> {out_type}",
+            f"{indent}mgpu.linear {self._value_names[value.name]}, "
+            f"{self._value_names[weight.name]}, {bias_name}, {result_name} "
+            f"{attr_text} : {value_type}, {weight_type}, {bias_type}, {out_type}"
         ]
 
     def _emit_activation(self, node: Node, result_name: str, indent: str) -> list[str]:

@@ -15,6 +15,7 @@ CPP_SUPPORTED_OPS = {
     Op.REDUCE_MEAN,
     Op.REDUCE_MAX,
     Op.MATMUL,
+    Op.LINEAR,
     Op.RELU,
     Op.LEAKY_RELU,
     Op.SILU,

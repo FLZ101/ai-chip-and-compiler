@@ -235,6 +235,14 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->grid),
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
+      } else if (auto isa = emitLinearIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
       } else if (auto isa = emitConvIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
@@ -2507,6 +2515,111 @@ struct MGpuToIsaPass
        << "MUL R9, R9, " << cStride << "\n"
        << "ADD R9, R9, " << cBase << "\n"
        << typedStoreOpcode(cType) << " [R9], R5\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText result;
+    result.code = code;
+    result.grid = std::to_string(gridX) + "x1x1";
+    result.block = "32x1x1";
+    return result;
+  }
+
+  std::optional<IsaText> emitLinearIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::LinearOp> linears;
+    launch.getBody().front().walk(
+        [&](mgpu::LinearOp linear) { linears.push_back(linear); });
+    if (linears.empty())
+      return std::nullopt;
+
+    auto linear = linears.front();
+    auto inputType = dyn_cast<MemRefType>(linear.getInput().getType());
+    auto weightType = dyn_cast<MemRefType>(linear.getWeight().getType());
+    auto outputType = dyn_cast<MemRefType>(linear.getOutput().getType());
+    if (!inputType || !weightType || !outputType)
+      return std::nullopt;
+    if (inputType.getRank() != 2 || weightType.getRank() != 2 ||
+        outputType.getRank() != 2)
+      return std::nullopt;
+
+    int64_t m = inputType.getShape()[0];
+    int64_t k = inputType.getShape()[1];
+    int64_t n = weightType.getShape()[0];
+    int64_t kWeight = weightType.getShape()[1];
+    int64_t total = m * n;
+    if (k != kWeight)
+      return std::nullopt;
+    if (isNibbleType(inputType.getElementType()) ||
+        isNibbleType(weightType.getElementType()) ||
+        isNibbleType(outputType.getElementType()))
+      return std::nullopt;
+
+    int64_t inputStride = elementStride(inputType.getElementType());
+    int64_t weightStride = elementStride(weightType.getElementType());
+    int64_t outputStride = elementStride(outputType.getElementType());
+    int64_t inputBase = bufferMap.base(linear.getInput());
+    int64_t weightBase = bufferMap.base(linear.getWeight());
+    int64_t outputBase = bufferMap.base(linear.getOutput());
+    int64_t biasBase =
+        linear.getHasBias() ? bufferMap.base(linear.getBias()) : 0;
+    auto biasType = linear.getHasBias()
+                        ? dyn_cast<MemRefType>(linear.getBias().getType())
+                        : nullptr;
+    int64_t gridX = (total + 31) / 32;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << total << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MOV R1, " << n << "\n"
+       << "IDIV R2, R0, R1\n"
+       << "MUL R3, R2, R1\n"
+       << "SUB R4, R0, R3\n"
+       << "MOV R5, 0\n"
+       << "MOV R6, 0\n"
+       << "MOV R7, " << k << "\n"
+       << "linear_loop:\n"
+       << "CMP.LT R8, R6, R7\n"
+       << "BRA linear_body, R8, linear_end\n"
+       << "BRA linear_end\n"
+       << "linear_body:\n"
+       << "MUL R9, R2, R7\n"
+       << "ADD R9, R9, R6\n"
+       << "MUL R9, R9, " << inputStride << "\n"
+       << "ADD R9, R9, " << inputBase << "\n"
+       << typedLoadOpcode(inputType) << " R10, [R9]\n"
+       << "MUL R11, R4, R7\n"
+       << "ADD R11, R11, R6\n"
+       << "MUL R11, R11, " << weightStride << "\n"
+       << "ADD R11, R11, " << weightBase << "\n"
+       << typedLoadOpcode(weightType) << " R12, [R11]\n"
+       << "MUL R13, R10, R12\n"
+       << "ADD R5, R5, R13\n"
+       << "ADD R6, R6, 1\n"
+       << "BRA linear_loop\n"
+       << "linear_end:\n";
+
+    if (linear.getHasBias()) {
+      os << "MUL R9, R4, "
+         << (biasType ? elementStride(biasType.getElementType()) : 4) << "\n"
+         << "ADD R9, R9, " << biasBase << "\n"
+         << (biasType ? typedLoadOpcode(biasType) : "LDG") << " R10, [R9]\n"
+         << "ADD R5, R5, R10\n";
+    }
+
+    os << "MUL R9, R2, R1\n"
+       << "ADD R9, R9, R4\n"
+       << "MUL R9, R9, " << outputStride << "\n"
+       << "ADD R9, R9, " << outputBase << "\n"
+       << typedStoreOpcode(outputType) << " [R9], R5\n"
        << "BRA end\n"
        << "end:\n"
        << "EXIT\n";

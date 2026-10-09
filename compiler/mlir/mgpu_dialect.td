@@ -97,6 +97,21 @@ def MGPU_AsyncCopyOp : MGPU_Op<"async_copy", [MemoryEffects<[MemRead, MemWrite]>
                        Index:$bytes);
 }
 
+def MGPU_LinearOp : MGPU_Op<"linear", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Dense linear layer with optional bias";
+  let arguments = (ins AnyMemRef:$input,
+                       AnyMemRef:$weight,
+                       AnyMemRef:$bias,
+                       AnyMemRef:$output,
+                       UnitAttr:$hasBias);
+  let results = (outs);
+  let assemblyFormat = [{
+    $input `,` $weight `,` $bias `,` $output
+    attr-dict
+    `:` type($input) `,` type($weight) `,` type($bias) `,` type($output)
+  }];
+}
+
 def MGPU_MmaOp : MGPU_Op<"mma", [Pure]> {
   let summary = "Reserved tensor-core matrix-multiply-accumulate";
   let description = [{

@@ -359,6 +359,21 @@ def MGPU_MemoryLayoutOp : MGPU_Op<"memory_layout", [NoMemoryEffect]> {
   }];
 }
 
+def MGPU_LinearOp : MGPU_Op<"linear", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Dense linear layer with optional bias";
+  let arguments = (ins AnyMemRef:$input,
+                       AnyMemRef:$weight,
+                       AnyMemRef:$bias,
+                       AnyMemRef:$output,
+                       UnitAttr:$hasBias);
+  let results = (outs);
+  let assemblyFormat = [{
+    $input `,` $weight `,` $bias `,` $output
+    attr-dict
+    `:` type($input) `,` type($weight) `,` type($bias) `,` type($output)
+  }];
+}
+
 def MGPU_Conv2DOp : MGPU_Op<"conv2d", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "2D convolution with optional bias";
   let arguments = (ins AnyMemRef:$image,
