@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from runtime import Driver
+from runtime import TuningConfig, autotune
 from runtime.memory_plan import PlannedBuffer, plan_memory
 
 
@@ -72,6 +73,21 @@ EXIT
         np.testing.assert_array_equal(
             buffers["a"].read(), np.zeros((8,), dtype=np.float32)
         )
+
+    def test_autotune_returns_best_without_changing_outputs(self):
+        candidates = [
+            TuningConfig(tile_m=16, tile_n=16, tile_k=16),
+            TuningConfig(tile_m=8, tile_n=8, tile_k=8),
+            TuningConfig(tile_m=32, tile_n=32, tile_k=32),
+        ]
+        expected = np.arange(8, dtype=np.float32)
+
+        def runner(config):
+            return float(config.tile_m), expected.copy()
+
+        result = autotune(candidates, runner)
+        self.assertEqual(result.config.tile_m, 8)
+        np.testing.assert_array_equal(result.outputs, expected)
 
 
 if __name__ == "__main__":
