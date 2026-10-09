@@ -1,6 +1,7 @@
 """Frontends that build the unified Model IR."""
 
 from .attention_functions import causal_mask, masked_attention
+from .cache_functions import kv_cache_append, kv_cache_gather
 from .detection_functions import box_decode, nms
 from .manual_frontend import ManualFrontend
 from .onnx_frontend import ONNXFrontend
@@ -12,6 +13,8 @@ __all__ = [
     "TorchFXFrontend",
     "box_decode",
     "causal_mask",
+    "kv_cache_append",
+    "kv_cache_gather",
     "masked_attention",
     "nms",
 ]

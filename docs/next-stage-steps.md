@@ -587,9 +587,18 @@ Tests: `tests/model_e2e/test_real_decoder.py`
 
 ### 6.4 KV-cache decode
 
+Status: **done**
+
 - append,
 - gather,
 - decode step.
+
+The PyTorch FX frontend now recognizes wrapped ``kv_cache_append`` and
+``kv_cache_gather`` primitives and lowers them to the matching ``mgpu`` target
+ops.  The exported decode-step model runs in the simulator and is compared
+against the NumPy KV-cache reference.
+
+Tests: `tests/model_e2e/test_real_kv_cache.py`
 
 ### 6.5 Autoregressive loop
 

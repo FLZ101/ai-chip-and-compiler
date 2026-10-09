@@ -11,6 +11,7 @@ import torch.nn as nn
 from ..model_ir import DType, Graph
 from ..mlir.importer import TorchMLIRImporter, TorchMLIRImportResult
 from .attention_functions import causal_mask, masked_attention
+from .cache_functions import kv_cache_append, kv_cache_gather
 from .detection_functions import box_decode, nms
 from .manual_frontend import ManualFrontend
 
@@ -163,6 +164,14 @@ class TorchFXFrontend:
             mask = self._resolve_arg(node.args[3], values)
             scale = self._resolve_optional_float(node, "scale", 4)
             return frontend.masked_attention(q, k, v, mask, scale=scale)
+        if target is kv_cache_append:
+            cache = self._resolve_arg(node.args[0], values)
+            value = self._resolve_arg(node.args[1], values)
+            return frontend.kv_cache_append(cache, value)
+        if target is kv_cache_gather:
+            cache = self._resolve_arg(node.args[0], values)
+            positions = self._resolve_arg(node.args[1], values)
+            return frontend.kv_cache_gather(cache, positions)
         raise TorchFXFrontendError(f"unsupported FX function: {target}")
 
     def _convert_call_module(
