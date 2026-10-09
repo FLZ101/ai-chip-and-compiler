@@ -7,7 +7,7 @@ SETUP_STAMP := $(VENV)/.make-setup
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup unit lit test pytest format precommit mgpu-opt cpp-sim cpp-sim-test benchmark-cpp-sim clean clean-venv
+.PHONY: help setup unit lit test pytest format precommit mgpu-opt cpp-sim cpp-sim-test benchmark-cpp-sim full-resnet18 full-resnet18-cpp full-resnet18-python clean clean-venv
 
 help:
 	@printf "Targets:\n"
@@ -22,6 +22,9 @@ help:
 	@printf "  make cpp-sim      Build the native C++ simulator\n"
 	@printf "  make cpp-sim-test Build and run native C++ simulator tests\n"
 	@printf "  make benchmark-cpp-sim  Compare Python and C++ simulator speed\n"
+	@printf "  make full-resnet18       Run full ResNet18 with native simulator\n"
+	@printf "  make full-resnet18-cpp   Alias for full-resnet18\n"
+	@printf "  make full-resnet18-python  Run full ResNet18 with Python simulator\n"
 	@printf "  make clean        Remove generated caches/test artifacts\n"
 	@printf "  make clean-venv   Remove .venv\n"
 
@@ -64,6 +67,18 @@ cpp-sim-test: cpp-sim
 
 benchmark-cpp-sim: cpp-sim
 	$(PY) scripts/benchmark_cpp_sim.py
+
+FULL_RESNET18_TEST = tests.model_e2e.test_real_cnn_execution.TestRealCNNExecution.test_full_resnet18_forward_runs_in_simulator
+
+full-resnet18: cpp-sim
+	MGPU_FULL_RESNET18=1 MGPU_CPP_SIM=1 \
+	  $(PY) -m unittest $(FULL_RESNET18_TEST) -v
+
+full-resnet18-cpp: full-resnet18
+
+full-resnet18-python: setup
+	MGPU_FULL_RESNET18=1 \
+	  $(PY) -m unittest $(FULL_RESNET18_TEST) -v
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
