@@ -557,9 +557,18 @@ Tests: `tests/model_e2e/test_real_cnn.py`
 
 ### 6.2 YOLO/SSD-style detection head
 
+Status: **done**
+
 - box decode,
 - NMS,
 - export and run.
+
+The PyTorch FX frontend now recognizes wrapped ``box_decode`` and ``nms``
+primitives and lowers them to the existing ``mgpu.box_decode`` and
+``mgpu.nms`` target ops.  The exported model runs in the simulator and is
+compared against the NumPy detection-head reference.
+
+Tests: `tests/model_e2e/test_real_detector.py`
 
 ### 6.3 Small GPT decoder block
 

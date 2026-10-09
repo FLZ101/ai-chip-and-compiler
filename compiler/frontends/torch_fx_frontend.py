@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from ..model_ir import DType, Graph
 from ..mlir.importer import TorchMLIRImporter, TorchMLIRImportResult
+from .detection_functions import box_decode, nms
 from .manual_frontend import ManualFrontend
 
 
@@ -137,6 +138,15 @@ class TorchFXFrontend:
                 self._resolve_arg(node.args[0], values),
                 self._resolve_arg(node.args[1], values),
             )
+        if target is box_decode:
+            boxes = self._resolve_arg(node.args[0], values)
+            deltas = self._resolve_arg(node.args[1], values)
+            return frontend.box_decode(boxes, deltas)
+        if target is nms:
+            boxes = self._resolve_arg(node.args[0], values)
+            scores = self._resolve_arg(node.args[1], values)
+            threshold = self._resolve_iou_threshold(node)
+            return frontend.nms(boxes, scores, iou_threshold=threshold)
         raise TorchFXFrontendError(f"unsupported FX function: {target}")
 
     def _convert_call_module(
@@ -224,6 +234,14 @@ class TorchFXFrontend:
         if isinstance(arg, (tuple, list)):
             return tuple(self._resolve_arg(item, values) for item in arg)
         raise TorchFXFrontendError(f"unsupported FX argument: {arg!r}")
+
+    @staticmethod
+    def _resolve_iou_threshold(node: torch.fx.Node) -> float:
+        if "iou_threshold" in node.kwargs:
+            return float(node.kwargs["iou_threshold"])
+        if len(node.args) > 2:
+            return float(node.args[2])
+        return 0.5
 
     def _resolve_attr(self, graph_module: torch.fx.GraphModule, target: str) -> Any:
         current: Any = graph_module
