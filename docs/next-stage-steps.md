@@ -543,9 +543,17 @@ See `tests/operator_e2e/test_typed_memory_e2e.py` and
 
 ### 6.1 ResNet-style block
 
+Status: **done**
+
 - export from PyTorch/ONNX,
 - lower through full pass pipeline,
 - compare with framework output.
+
+The block is exported through both the PyTorch FX frontend and the ONNX
+frontend, lowered with the current C++ ``mgpu-opt`` backend, and compared
+against PyTorch and the ONNX reference evaluator.
+
+Tests: `tests/model_e2e/test_real_cnn.py`
 
 ### 6.2 YOLO/SSD-style detection head
 
