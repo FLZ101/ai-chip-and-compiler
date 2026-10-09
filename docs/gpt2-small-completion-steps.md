@@ -124,7 +124,8 @@ Exit:
 
 Implemented with explicit GPT-2-sized `PlannedBuffer` entries in
 `tests/model_e2e/test_real_llm_memory.py`. Full canonicalized-module injection
-still requires support for the `tm_tensor.scan` op.
+now gets through bufferization after `tm_tensor.scan` lowering; the remaining
+blocker is unsupported `arith.index_cast` lowering in `mgpu-to-isa`.
 
 ## Step 7: Implement greedy autoregressive loop
 

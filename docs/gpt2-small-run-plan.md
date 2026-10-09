@@ -229,8 +229,9 @@ Exit criteria:
 
 The test builds an explicit GPT-2-sized buffer plan for embeddings, all 12
 transformer-block weights, activations, final logits, and the KV cache. Full
-module-level plan injection remains blocked by the unsupported
-`tm_tensor.scan` op in the canonicalized GPT-2 module.
+module-level plan injection now passes bufferization; the remaining blocker is
+unsupported `arith.index_cast`/`linalg.generic` lowering during
+`map-to-mgpu`/`mgpu-to-isa`.
 
 ### Phase F: Autoregressive loop
 
