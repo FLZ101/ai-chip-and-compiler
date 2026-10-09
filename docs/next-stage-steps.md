@@ -572,9 +572,18 @@ Tests: `tests/model_e2e/test_real_detector.py`
 
 ### 6.3 Small GPT decoder block
 
+Status: **done**
+
 - causal mask,
 - attention,
 - residual.
+
+The PyTorch FX frontend now recognizes wrapped ``causal_mask`` and
+``masked_attention`` primitives and lowers them to ``mgpu.causal_mask`` and
+``mgpu.attention``.  The exported decoder block runs in the simulator and is
+compared against the NumPy decoder-block reference.
+
+Tests: `tests/model_e2e/test_real_decoder.py`
 
 ### 6.4 KV-cache decode
 

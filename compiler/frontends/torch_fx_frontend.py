@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from ..model_ir import DType, Graph
 from ..mlir.importer import TorchMLIRImporter, TorchMLIRImportResult
+from .attention_functions import causal_mask, masked_attention
 from .detection_functions import box_decode, nms
 from .manual_frontend import ManualFrontend
 
@@ -147,6 +148,21 @@ class TorchFXFrontend:
             scores = self._resolve_arg(node.args[1], values)
             threshold = self._resolve_iou_threshold(node)
             return frontend.nms(boxes, scores, iou_threshold=threshold)
+        if target is causal_mask:
+            query = self._resolve_arg(node.args[0], values)
+            key = self._resolve_arg(node.args[1], values)
+            return frontend.causal_mask(
+                query_len=query.shape[2],
+                key_len=key.shape[2],
+                batch=query.shape[0],
+            )
+        if target is masked_attention:
+            q = self._resolve_arg(node.args[0], values)
+            k = self._resolve_arg(node.args[1], values)
+            v = self._resolve_arg(node.args[2], values)
+            mask = self._resolve_arg(node.args[3], values)
+            scale = self._resolve_optional_float(node, "scale", 4)
+            return frontend.masked_attention(q, k, v, mask, scale=scale)
         raise TorchFXFrontendError(f"unsupported FX function: {target}")
 
     def _convert_call_module(
@@ -242,6 +258,21 @@ class TorchFXFrontend:
         if len(node.args) > 2:
             return float(node.args[2])
         return 0.5
+
+    @staticmethod
+    def _resolve_optional_float(
+        node: torch.fx.Node,
+        key: str,
+        positional_index: int,
+    ) -> float | None:
+        if key in node.kwargs and node.kwargs[key] is not None:
+            return float(node.kwargs[key])
+        if (
+            len(node.args) > positional_index
+            and node.args[positional_index] is not None
+        ):
+            return float(node.args[positional_index])
+        return None
 
     def _resolve_attr(self, graph_module: torch.fx.GraphModule, target: str) -> Any:
         current: Any = graph_module
