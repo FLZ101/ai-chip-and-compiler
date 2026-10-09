@@ -1,4 +1,5 @@
 #include "cpp_sim/core.h"
+#include "cpp_sim/software_kernels.h"
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -10,6 +11,13 @@
 namespace py = pybind11;
 
 namespace {
+
+std::vector<int64_t> to_i64_vector(const py::tuple &value) {
+  std::vector<int64_t> result;
+  for (auto item : value)
+    result.push_back(item.cast<int64_t>());
+  return result;
+}
 
 py::dict run_global(py::buffer global_buffer, int shared_size, int sm_count,
                     int register_count, const std::string &asm_text,
@@ -54,6 +62,34 @@ py::dict run_global(py::buffer global_buffer, int shared_size, int sm_count,
   return result;
 }
 
+bool software_run(py::buffer global_buffer, const py::dict &request_dict) {
+  py::buffer_info info = global_buffer.request();
+  if (info.format != py::format_descriptor<uint8_t>::format())
+    throw std::runtime_error("global buffer must be a byte buffer");
+  const auto *src = static_cast<const uint8_t *>(info.ptr);
+  std::vector<uint8_t> bytes(src, src + static_cast<size_t>(info.size));
+  cpp_sim::ByteMemory memory(bytes.size(), "software");
+  std::memcpy(memory.bytes().data(), bytes.data(), bytes.size());
+
+  cpp_sim::SoftwareKernelRequest request;
+  request.op = request_dict["op"].cast<std::string>();
+  request.input_shape = to_i64_vector(request_dict["input_shape"].cast<py::tuple>());
+  request.weight_shape = to_i64_vector(request_dict["weight_shape"].cast<py::tuple>());
+  request.output_shape = to_i64_vector(request_dict["output_shape"].cast<py::tuple>());
+  request.strides = to_i64_vector(request_dict["strides"].cast<py::tuple>());
+  request.paddings = to_i64_vector(request_dict["paddings"].cast<py::tuple>());
+  request.dilations = to_i64_vector(request_dict["dilations"].cast<py::tuple>());
+  request.has_bias = request_dict["has_bias"].cast<bool>();
+  request.input_offset = request_dict["input_offset"].cast<int64_t>();
+  request.weight_offset = request_dict["weight_offset"].cast<int64_t>();
+  request.bias_offset = request_dict["bias_offset"].cast<int64_t>();
+  request.output_offset = request_dict["output_offset"].cast<int64_t>();
+
+  bool ok = cpp_sim::run_software_kernel(memory, request);
+  std::memcpy(info.ptr, memory.bytes().data(), bytes.size());
+  return ok;
+}
+
 } // namespace
 
 PYBIND11_MODULE(cpp_sim, module) {
@@ -63,4 +99,6 @@ PYBIND11_MODULE(cpp_sim, module) {
              py::arg("register_count"), py::arg("asm_text"),
              py::arg("grid_dim"), py::arg("block_dim"),
              py::arg("profile") = false);
+  module.def("software_run", &software_run, py::arg("global_buffer"),
+             py::arg("request"));
 }
