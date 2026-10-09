@@ -49,13 +49,14 @@ Already available:
 - static `tm_tensor.scan` lowering to `linalg.matmul`.
 - initial `linalg.generic` lowering for integer casts, fills, compares,
   selects, and selected float/reduction patterns.
+- complete software operator coverage for the full GPT-2 graph, including
+  batched `Linear` and exact GELU.
 - mgpu-vs-software differential tests for the supported operators.
 
 Missing for full GPT-2:
 
 - wire pretrained weights into the full Model IR graph and validate it against
   PyTorch,
-- complete the native software execution path for all GPT-2 graph nodes,
 - full static `seq=8` forward through the software operator runner,
 - greedy autoregressive loop orchestration,
 - numerical token/logit gates against PyTorch.
