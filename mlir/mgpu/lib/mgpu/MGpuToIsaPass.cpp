@@ -838,9 +838,9 @@ struct MGpuToIsaPass
       return std::nullopt;
 
     int64_t total = c * oh * ow;
-    int64_t imageBase = 0;
-    int64_t weightBase = n * c * h * w * 4;
-    int64_t outputBase = weightBase + c * kh * kw * 4;
+    int64_t imageBase = bufferMap.base(op.getInputs()[0]);
+    int64_t weightBase = bufferMap.base(op.getInputs()[1]);
+    int64_t outputBase = bufferMap.base(op.getOutputs()[0]);
     int64_t strideY = 1;
     int64_t strideX = 1;
 
@@ -958,8 +958,8 @@ struct MGpuToIsaPass
     int64_t strideY = 2;
     int64_t strideX = 2;
     int64_t total = c * oh * ow;
-    int64_t inputBase = 0;
-    int64_t outputBase = n * c * h * w * 4;
+    int64_t inputBase = bufferMap.base(dstOp.getDpsInputs()[0]);
+    int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
     std::string arith = maxPool ? "MAX" : "ADD";
     std::string identity = maxPool ? "-1.0e30" : "0";
 
@@ -1037,8 +1037,8 @@ struct MGpuToIsaPass
       int64_t h = inputType.getShape()[2];
       int64_t w = inputType.getShape()[3];
       int64_t total = c;
-      int64_t inputBase = 0;
-      int64_t outputBase = c * h * w * 4;
+      int64_t inputBase = bufferMap.base(dstOp.getDpsInputs()[0]);
+      int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
 
       std::string code;
       llvm::raw_string_ostream os(code);
@@ -2328,9 +2328,9 @@ struct MGpuToIsaPass
     if (spatialSize > 16 || reductionSize > 16 || f > 16)
       return std::nullopt;
 
-    int64_t imageBase = 0;
-    int64_t weightBase = n * c * h * w * 4;
-    int64_t outputBase = weightBase + f * c * kh * kw * 4;
+    int64_t imageBase = bufferMap.base(dstOp.getDpsInputs()[0]);
+    int64_t weightBase = bufferMap.base(dstOp.getDpsInputs()[1]);
+    int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
 
     std::string code;
     llvm::raw_string_ostream os(code);
