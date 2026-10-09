@@ -3397,6 +3397,37 @@ struct MGpuToIsaPass
        << skipLabel << ":\n";
   }
 
+  static void emitStoreOutputFragmentRegBase(
+      llvm::raw_ostream &os, int sourceReg, int rowGroup, int colGroup,
+      int outputBaseReg, int64_t seq, int64_t dim, int qTileReg,
+      int vTileReg, int slotId) {
+    std::string storeLabel = "mapped_value_store_" + std::to_string(slotId);
+    std::string skipLabel = "mapped_value_store_skip_" + std::to_string(slotId);
+    os << "MOV R26, R" << qTileReg << "\n"
+       << "MUL R26, R26, 16\n"
+       << "ADD R26, R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MOV R27, R" << vTileReg << "\n"
+       << "MUL R27, R27, 16\n"
+       << "ADD R27, R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "MOV R39, " << seq << "\n"
+       << "CMP.LT R28, R26, R39\n"
+       << "MOV R39, " << dim << "\n"
+       << "CMP.LT R38, R27, R39\n"
+       << "MUL R28, R28, R38\n"
+       << "BRA " << storeLabel << ", R28, " << skipLabel << "\n"
+       << "BRA " << skipLabel << "\n"
+       << storeLabel << ":\n"
+       << "MOV R37, " << dim << "\n"
+       << "MUL R37, R26, R37\n"
+       << "ADD R37, R37, R27\n"
+       << "MUL R37, R37, 4\n"
+       << "ADD R37, R37, R" << outputBaseReg << "\n"
+       << "STG [R37], R" << sourceReg << "\n"
+       << skipLabel << ":\n";
+  }
+
   static void emitValueFragmentTiledReg(llvm::raw_ostream &os, int dest,
                                         int rowGroup, int colGroup,
                                         int64_t vBase, int64_t seq,
@@ -3424,6 +3455,37 @@ struct MGpuToIsaPass
        << "ADD R37, R37, R30\n"
        << "MUL R37, R37, 4\n"
        << "ADD R37, R37, " << vBase << "\n"
+       << "LDG R42, [R37]\n"
+       << "MOV R39, 0\n"
+       << "SEL R" << dest << ", R28, R42, R39\n";
+  }
+
+  static void emitValueFragmentTiledRegBase(
+      llvm::raw_ostream &os, int dest, int rowGroup, int colGroup,
+      int vBaseReg, int64_t seq, int64_t dim, int rowTileReg,
+      int colTileReg) {
+    os << "MOV R26, R" << rowTileReg << "\n"
+       << "MUL R26, R26, 16\n"
+       << "ADD R26, R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MOV R27, R" << colTileReg << "\n"
+       << "MUL R27, R27, 16\n"
+       << "ADD R27, R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "MOV R39, " << seq << "\n"
+       << "CMP.LT R28, R26, R39\n"
+       << "MOV R39, " << dim << "\n"
+       << "CMP.LT R38, R27, R39\n"
+       << "MUL R28, R28, R38\n"
+       << "MOV R39, " << (seq - 1) << "\n"
+       << "MIN R29, R26, R39\n"
+       << "MOV R39, " << (dim - 1) << "\n"
+       << "MIN R30, R27, R39\n"
+       << "MOV R37, " << dim << "\n"
+       << "MUL R37, R29, R37\n"
+       << "ADD R37, R37, R30\n"
+       << "MUL R37, R37, 4\n"
+       << "ADD R37, R37, R" << vBaseReg << "\n"
        << "LDG R42, [R37]\n"
        << "MOV R39, 0\n"
        << "SEL R" << dest << ", R28, R42, R39\n";
@@ -4174,6 +4236,37 @@ struct MGpuToIsaPass
        << "SEL R" << dest << ", R28, R42, R39\n";
   }
 
+  static void emitAttentionQFragmentTiledRegBase(
+      llvm::raw_ostream &os, int dest, int rowGroup, int colGroup,
+      int qBaseReg, int64_t seq, int64_t dim, int rowTileReg,
+      int colTileReg) {
+    os << "MOV R26, R" << rowTileReg << "\n"
+       << "MUL R26, R26, 16\n"
+       << "ADD R26, R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MOV R27, R" << colTileReg << "\n"
+       << "MUL R27, R27, 16\n"
+       << "ADD R27, R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "MOV R39, " << seq << "\n"
+       << "CMP.LT R28, R26, R39\n"
+       << "MOV R39, " << dim << "\n"
+       << "CMP.LT R38, R27, R39\n"
+       << "MUL R28, R28, R38\n"
+       << "MOV R39, " << (seq - 1) << "\n"
+       << "MIN R29, R26, R39\n"
+       << "MOV R39, " << (dim - 1) << "\n"
+       << "MIN R30, R27, R39\n"
+       << "MOV R37, " << dim << "\n"
+       << "MUL R37, R29, R37\n"
+       << "ADD R37, R37, R30\n"
+       << "MUL R37, R37, 4\n"
+       << "ADD R37, R37, R" << qBaseReg << "\n"
+       << "LDG R42, [R37]\n"
+       << "MOV R39, 0\n"
+       << "SEL R" << dest << ", R28, R42, R39\n";
+  }
+
   static void emitAttentionKTransposeFragment(
       llvm::raw_ostream &os, int dest, int rowGroup, int colGroup,
       int64_t kBase, int64_t seq, int64_t dim) {
@@ -4226,6 +4319,37 @@ struct MGpuToIsaPass
        << "ADD R37, R37, R29\n"
        << "MUL R37, R37, 4\n"
        << "ADD R37, R37, " << kBase << "\n"
+       << "LDG R42, [R37]\n"
+       << "MOV R39, 0\n"
+       << "SEL R" << dest << ", R28, R42, R39\n";
+  }
+
+  static void emitAttentionKTransposeFragmentTiledRegBase(
+      llvm::raw_ostream &os, int dest, int rowGroup, int colGroup,
+      int kBaseReg, int64_t seq, int64_t dim, int rowTileReg,
+      int colTileReg) {
+    os << "MOV R26, R" << rowTileReg << "\n"
+       << "MUL R26, R26, 16\n"
+       << "ADD R26, R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MOV R27, R" << colTileReg << "\n"
+       << "MUL R27, R27, 16\n"
+       << "ADD R27, R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "MOV R39, " << dim << "\n"
+       << "CMP.LT R28, R26, R39\n"
+       << "MOV R39, " << seq << "\n"
+       << "CMP.LT R38, R27, R39\n"
+       << "MUL R28, R28, R38\n"
+       << "MOV R39, " << (dim - 1) << "\n"
+       << "MIN R29, R26, R39\n"
+       << "MOV R39, " << (seq - 1) << "\n"
+       << "MIN R30, R27, R39\n"
+       << "MOV R37, " << dim << "\n"
+       << "MUL R37, R30, R37\n"
+       << "ADD R37, R37, R29\n"
+       << "MUL R37, R37, 4\n"
+       << "ADD R37, R37, R" << kBaseReg << "\n"
        << "LDG R42, [R37]\n"
        << "MOV R39, 0\n"
        << "SEL R" << dest << ", R28, R42, R39\n";
@@ -4611,6 +4735,300 @@ struct MGpuToIsaPass
     return result;
   }
 
+  struct MappedAttentionShape {
+    int64_t batch = 0;
+    int64_t heads = 0;
+    int64_t seq = 0;
+    int64_t dim = 0;
+    int64_t qTiles = 0;
+    int64_t kTiles = 0;
+    int64_t dTiles = 0;
+    int64_t vTiles = 0;
+    int64_t qBase = 0;
+    int64_t kBase = 0;
+    int64_t vBase = 0;
+    int64_t outputBase = 0;
+    int64_t maskBase = 0;
+    int64_t qBatchStride = 0;
+    int64_t qHeadStride = 0;
+    int64_t maskBatchStride = 0;
+    int64_t maskHeadStride = 0;
+  };
+
+  std::optional<MappedAttentionShape>
+  getMappedAttentionShape(mgpu::AttentionOp attention) const {
+    auto qType = dyn_cast<MemRefType>(attention.getQ().getType());
+    auto kType = dyn_cast<MemRefType>(attention.getK().getType());
+    auto vType = dyn_cast<MemRefType>(attention.getV().getType());
+    auto outputType = dyn_cast<MemRefType>(attention.getOutput().getType());
+    if (!qType || !kType || !vType || !outputType || qType.getRank() != 4 ||
+        kType.getRank() != 4 || vType.getRank() != 4 ||
+        outputType.getRank() != 4)
+      return std::nullopt;
+
+    int64_t batch = qType.getShape()[0];
+    int64_t heads = qType.getShape()[1];
+    int64_t seq = qType.getShape()[2];
+    int64_t dim = qType.getShape()[3];
+    if (batch <= 0 || heads <= 0 || seq <= 0 || dim <= 0)
+      return std::nullopt;
+    if (kType.getShape() != qType.getShape() ||
+        vType.getShape() != qType.getShape() ||
+        outputType.getShape() != qType.getShape())
+      return std::nullopt;
+
+    MappedAttentionShape shape;
+    shape.batch = batch;
+    shape.heads = heads;
+    shape.seq = seq;
+    shape.dim = dim;
+    shape.qTiles = (seq + 15) / 16;
+    shape.kTiles = (seq + 15) / 16;
+    shape.dTiles = (dim + 15) / 16;
+    shape.vTiles = (dim + 15) / 16;
+    shape.qBase = bufferMap.base(attention.getQ());
+    shape.kBase = bufferMap.base(attention.getK());
+    shape.vBase = bufferMap.base(attention.getV());
+    shape.outputBase = bufferMap.base(attention.getOutput());
+    shape.maskBase = bufferMap.base(attention.getMask());
+    shape.qBatchStride = heads * seq * dim * 4;
+    shape.qHeadStride = seq * dim * 4;
+    shape.maskBatchStride = heads * seq * seq * 4;
+    shape.maskHeadStride = seq * seq * 4;
+    return shape;
+  }
+
+  void emitMappedBaseRegisters(llvm::raw_ostream &os,
+                               const MappedAttentionShape &shape) {
+    os << "MOV R0, ctaid.x\n"
+       << "MOV R1, " << shape.qTiles << "\n"
+       << "IDIV R2, R0, R1\n"
+       << "MUL R3, R2, R1\n"
+       << "SUB R54, R0, R3\n"
+       << "MOV R1, " << shape.heads << "\n"
+       << "IDIV R55, R2, R1\n"
+       << "MUL R3, R55, R1\n"
+       << "SUB R56, R2, R3\n";
+
+    os << "MOV R49, R55\n"
+       << "MUL R49, R49, " << shape.qBatchStride << "\n"
+       << "MOV R0, R56\n"
+       << "MUL R0, R0, " << shape.qHeadStride << "\n"
+       << "ADD R49, R49, R0\n"
+       << "ADD R49, R49, " << shape.qBase << "\n";
+
+    os << "MOV R50, R55\n"
+       << "MUL R50, R50, " << shape.qBatchStride << "\n"
+       << "MOV R0, R56\n"
+       << "MUL R0, R0, " << shape.qHeadStride << "\n"
+       << "ADD R50, R50, R0\n"
+       << "ADD R50, R50, " << shape.kBase << "\n";
+
+    os << "MOV R51, R55\n"
+       << "MUL R51, R51, " << shape.qBatchStride << "\n"
+       << "MOV R0, R56\n"
+       << "MUL R0, R0, " << shape.qHeadStride << "\n"
+       << "ADD R51, R51, R0\n"
+       << "ADD R51, R51, " << shape.vBase << "\n";
+
+    os << "MOV R52, R55\n"
+       << "MUL R52, R52, " << shape.qBatchStride << "\n"
+       << "MOV R0, R56\n"
+       << "MUL R0, R0, " << shape.qHeadStride << "\n"
+       << "ADD R52, R52, R0\n"
+       << "ADD R52, R52, " << shape.outputBase << "\n";
+
+    os << "MOV R53, R55\n"
+       << "MUL R53, R53, " << shape.maskBatchStride << "\n"
+       << "MOV R0, R56\n"
+       << "MUL R0, R0, " << shape.maskHeadStride << "\n"
+       << "ADD R53, R53, R0\n"
+       << "ADD R53, R53, " << shape.maskBase << "\n";
+  }
+
+  void emitMappedAttentionScoreBody(llvm::raw_ostream &os,
+                                    const MappedAttentionShape &shape) {
+    emitKeyTileLoopStart(os, shape.kTiles, "mapped_key_tile_end");
+    emitZeroTile(os, 16);
+    emitDimTileLoopStart(os, shape.dTiles, "mapped_dim_tile_end");
+
+    for (int slot = 0; slot < 8; ++slot) {
+      emitAttentionQFragmentTiledRegBase(os, slot, slot / 4, slot % 4, 49,
+                                         shape.seq, shape.dim, 54, 46);
+      emitAttentionKTransposeFragmentTiledRegBase(
+          os, 8 + slot, slot / 4, slot % 4, 50, shape.seq, shape.dim, 46, 43);
+    }
+
+    emitMmaAccumulate(os, 16, 0, 8, 16);
+    emitDimTileLoopEnd(os, "mapped_dim_tile_end");
+
+    // Each block owns one query tile, so the shared-memory score array is
+    // indexed only by key tile: offset = key_tile * 16 * 16 * 4.
+    os << "MOV R48, R43\n"
+       << "MUL R48, R48, 1024\n";
+    emitStoreFullTileReg(os, 16, 48, 0);
+    os << "BAR.SYNC\n";
+    emitKeyTileLoopEnd(os, "mapped_key_tile_end");
+  }
+
+  static void emitMappedSoftmaxScoreRead(llvm::raw_ostream &os,
+                                         int qLocalReg, int keyReg,
+                                         int rowReg, int destReg, int64_t seq,
+                                         double scale, int maskBaseReg,
+                                         bool masked) {
+    os << "MOV R7, R" << keyReg << "\n"
+       << "IDIV R7, R7, 16\n"
+       << "MOV R8, R7\n"
+       << "MUL R8, R8, 16\n"
+       << "SUB R8, R" << keyReg << ", R8\n"
+       << "MOV R9, R7\n"
+       << "MUL R9, R9, 1024\n"
+       << "MOV R10, R" << qLocalReg << "\n"
+       << "MUL R10, R10, 16\n"
+       << "ADD R10, R10, R8\n"
+       << "MUL R10, R10, 4\n"
+       << "ADD R10, R10, R9\n"
+       << "LDS R" << destReg << ", [R10]\n"
+       << "MUL R" << destReg << ", R" << destReg << ", " << scale << "\n";
+    if (masked) {
+      os << "MOV R12, R" << rowReg << "\n"
+         << "MUL R12, R12, " << seq << "\n"
+         << "ADD R12, R12, R" << keyReg << "\n"
+         << "MUL R12, R12, 4\n"
+         << "ADD R12, R12, R" << maskBaseReg << "\n"
+         << "LDG R13, [R12]\n"
+         << "CMP.EQ R14, R13, 0\n"
+         << "MOV R15, -1.0e30\n"
+         << "SEL R" << destReg << ", R14, R15, R" << destReg << "\n";
+    }
+  }
+
+  void emitMappedAttentionSoftmaxBody(llvm::raw_ostream &os,
+                                      const MappedAttentionShape &shape,
+                                      double scale, bool masked) {
+    os << "MOV R0, tid.x\n"
+       << "MOV R1, R54\n"
+       << "MUL R1, R1, 16\n"
+       << "MOV R2, " << shape.seq << "\n"
+       << "SUB R2, R2, R1\n"
+       << "MOV R3, 16\n"
+       << "CMP.LT R4, R2, R3\n"
+       << "BRA mapped_row_limit_min, R4, mapped_row_limit_ge\n"
+       << "BRA mapped_row_limit_ge\n"
+       << "mapped_row_limit_min:\n"
+       << "MOV R1, R2\n"
+       << "BRA mapped_row_limit_done\n"
+       << "mapped_row_limit_ge:\n"
+       << "MOV R1, R3\n"
+       << "mapped_row_limit_done:\n"
+       << "mapped_softmax_row_loop:\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA mapped_softmax_row_body, R2, mapped_softmax_row_end\n"
+       << "BRA mapped_softmax_row_end\n"
+       << "mapped_softmax_row_body:\n"
+       << "MOV R57, R54\n"
+       << "MUL R57, R57, 16\n"
+       << "ADD R57, R57, R0\n"
+       << "MOV R4, -1.0e30\n"
+       << "MOV R5, 0\n"
+       << "mapped_softmax_max_loop:\n"
+       << "CMP.LT R6, R5, " << shape.seq << "\n"
+       << "BRA mapped_softmax_max_body, R6, mapped_softmax_max_end\n"
+       << "BRA mapped_softmax_max_end\n"
+       << "mapped_softmax_max_body:\n";
+    emitMappedSoftmaxScoreRead(os, 0, 5, 57, 11, shape.seq, scale, 53, masked);
+    os << "MAX R4, R4, R11\n"
+       << "ADD R5, R5, 1\n"
+       << "BRA mapped_softmax_max_loop\n"
+       << "mapped_softmax_max_end:\n"
+       << "MOV R5, 0\n"
+       << "MOV R16, 0\n"
+       << "mapped_softmax_sum_loop:\n"
+       << "CMP.LT R6, R5, " << shape.seq << "\n"
+       << "BRA mapped_softmax_sum_body, R6, mapped_softmax_sum_end\n"
+       << "BRA mapped_softmax_sum_end\n"
+       << "mapped_softmax_sum_body:\n";
+    emitMappedSoftmaxScoreRead(os, 0, 5, 57, 11, shape.seq, scale, 53, masked);
+    os << "SUB R11, R11, R4\n"
+       << "MUL R11, R11, 1.4426950408889634\n"
+       << "EXP2 R11, R11\n"
+       << "ADD R16, R16, R11\n"
+       << "ADD R5, R5, 1\n"
+       << "BRA mapped_softmax_sum_loop\n"
+       << "mapped_softmax_sum_end:\n"
+       << "MOV R5, 0\n"
+       << "mapped_softmax_store_loop:\n"
+       << "CMP.LT R6, R5, " << shape.seq << "\n"
+       << "BRA mapped_softmax_store_body, R6, mapped_softmax_store_end\n"
+       << "BRA mapped_softmax_store_end\n"
+       << "mapped_softmax_store_body:\n";
+    emitMappedSoftmaxScoreRead(os, 0, 5, 57, 11, shape.seq, scale, 53, masked);
+    os << "SUB R11, R11, R4\n"
+       << "MUL R11, R11, 1.4426950408889634\n"
+       << "EXP2 R11, R11\n"
+       << "DIV R11, R11, R16\n"
+       << "STS [R10], R11\n"
+       << "ADD R5, R5, 1\n"
+       << "BRA mapped_softmax_store_loop\n"
+       << "mapped_softmax_store_end:\n"
+       << "ADD R0, R0, 32\n"
+       << "BRA mapped_softmax_row_loop\n"
+       << "mapped_softmax_row_end:\n"
+       << "BAR.SYNC\n";
+  }
+
+  void emitMappedAttentionValueBody(llvm::raw_ostream &os,
+                                    const MappedAttentionShape &shape) {
+    emitValueVTileLoopStart(os, shape.vTiles, "mapped_value_v_tile_end");
+    emitZeroTile(os, 16);
+    emitValueKTileLoopStart(os, shape.kTiles, "mapped_value_k_tile_end");
+
+    os << "MOV R48, R43\n"
+       << "MUL R48, R48, 1024\n";
+    emitLoadFullTileReg(os, 0, 48, 0);
+
+    for (int slot = 0; slot < 8; ++slot) {
+      emitValueFragmentTiledRegBase(os, 8 + slot, slot / 4, slot % 4, 51,
+                                    shape.seq, shape.dim, 43, 46);
+    }
+
+    emitMmaAccumulate(os, 16, 0, 8, 16);
+    emitValueKTileLoopEnd(os, "mapped_value_k_tile_end");
+
+    for (int slot = 0; slot < 8; ++slot) {
+      emitStoreOutputFragmentRegBase(os, 16 + slot, slot / 4, slot % 4, 52,
+                                     shape.seq, shape.dim, 54, 46, slot);
+    }
+
+    emitValueVTileLoopEnd(os, "mapped_value_v_tile_end");
+  }
+
+  std::optional<IsaText>
+  emitMappedAttentionFullIsa(mgpu::AttentionOp attention) {
+    auto shape = getMappedAttentionShape(attention);
+    if (!shape)
+      return std::nullopt;
+
+    double scale = attention.getScale().convertToDouble();
+    bool masked = attention.getMasked();
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitLaneIndex(os);
+    emitMappedBaseRegisters(os, *shape);
+    emitMappedAttentionScoreBody(os, *shape);
+    emitMappedAttentionSoftmaxBody(os, *shape, scale, masked);
+    emitMappedAttentionValueBody(os, *shape);
+    os << "EXIT\n";
+    os.flush();
+
+    IsaText result;
+    result.code = code;
+    result.grid = std::to_string(shape->batch * shape->heads * shape->qTiles) +
+                  "x1x1";
+    result.block = "32x1x1";
+    return result;
+  }
+
   std::optional<IsaText> emitScalarAttentionIsa(mgpu::AttentionOp attention) {
     auto qType = dyn_cast<MemRefType>(attention.getQ().getType());
     auto kType = dyn_cast<MemRefType>(attention.getK().getType());
@@ -4828,7 +5246,7 @@ struct MGpuToIsaPass
     if (qType.getRank() == 4 && kType.getRank() == 4 &&
         vType.getRank() == 4 && outputType.getRank() == 4) {
       if (emitAttentionTiledStage) {
-        if (auto fullIsa = emitTiledAttentionFullIsa(attention))
+        if (auto fullIsa = emitMappedAttentionFullIsa(attention))
           return fullIsa;
       }
       if (emitAttentionSoftmaxStage) {

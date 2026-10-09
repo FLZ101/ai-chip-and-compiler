@@ -2,16 +2,14 @@
 
 // CHECK: func.func @attention_full
 // CHECK: "mgpu.isa"()
-// CHECK-SAME: query_tile_loop:
 // CHECK-SAME: key_tile_loop:
 // CHECK-SAME: dim_tile_loop:
 // CHECK-SAME: MMA R16, R0, R8, R16
-// CHECK-SAME: softmax_row_loop:
-// CHECK-SAME: softmax_max_loop:
-// CHECK-SAME: softmax_sum_loop:
-// CHECK-SAME: softmax_store_loop:
+// CHECK-SAME: mapped_softmax_row_loop:
+// CHECK-SAME: mapped_softmax_max_loop:
+// CHECK-SAME: mapped_softmax_sum_loop:
+// CHECK-SAME: mapped_softmax_store_loop:
 // CHECK-SAME: EXP2
-// CHECK-SAME: value_q_tile_loop:
 // CHECK-SAME: value_v_tile_loop:
 // CHECK-SAME: value_k_tile_loop:
 // CHECK-SAME: MMA R16, R0, R8, R16
