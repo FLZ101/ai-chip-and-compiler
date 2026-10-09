@@ -10,6 +10,10 @@ from pathlib import Path
 
 from .pipeline import mgpu_opt_pipeline_text
 
+DEFAULT_MODEL_PIPELINE = (
+    "builtin.module(one-shot-bufferize,func.func(map-to-mgpu,mgpu-to-isa))"
+)
+
 
 class MGpuOptError(Exception):
     """Raised when ``mgpu-opt`` fails or returns an unexpected module."""
@@ -77,6 +81,25 @@ def run_mgpu_pipeline(
     grid = _parse_dim_string(_unescape_mlir_string(attrs["grid"]))
     block = _parse_dim_string(_unescape_mlir_string(attrs["block"]))
     return MGpuIsaResult(code=code, grid=grid, block=block)
+
+
+def run_model_pipeline(
+    mlir_text: str,
+    *,
+    mgpu_opt: str | Path | None = None,
+) -> MGpuIsaResult:
+    """Run the real linalg-on-tensors model pipeline.
+
+    This is the M4.5 entry point.  It buffers tensor-function boundaries,
+    maps bufferized linalg compute to ``mgpu.launch``, and emits ISA.  The
+    first implementation supports exactly one ISA-producing launch, which is
+    sufficient for single-matmul/conv model fragments.
+    """
+    return run_mgpu_pipeline(
+        mlir_text,
+        mgpu_opt=mgpu_opt,
+        pipeline=DEFAULT_MODEL_PIPELINE,
+    )
 
 
 def lower_with_mgpu_opt(

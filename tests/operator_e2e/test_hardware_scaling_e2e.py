@@ -6,6 +6,9 @@ import unittest
 
 import numpy as np
 
+from compiler.frontends.manual_frontend import ManualFrontend
+from compiler.mlir import MLIRBuilder, run_mgpu_pipeline
+from compiler.model_ir import DType
 from hw.device import create_device, launch
 from hw.isa import parse_asm
 from runtime.driver import Driver
@@ -66,6 +69,33 @@ class TestHardwareScalingEndToEnd(unittest.TestCase):
         np.testing.assert_allclose(
             f16.read(), np.asarray([0.0, 0.5, -1.0, 2.0], dtype=np.float32)
         )
+
+    def test_large_elementwise_kernel_uses_waves(self):
+        n = 128
+        frontend = ManualFrontend("large_add")
+        a = frontend.add_input("a", DType.F32, (n,))
+        b = frontend.add_input("b", DType.F32, (n,))
+        frontend.output(frontend.add(a, b))
+        result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+
+        a_data = np.arange(n, dtype=np.float32)
+        b_data = np.ones(n, dtype=np.float32)
+        expected = a_data + b_data
+        device = create_device(global_size=1 << 20, sm_count=4)
+        device.global_memory.load_floats(0, a_data.tolist())
+        device.global_memory.load_floats(n * 4, b_data.tolist())
+
+        launch(
+            device,
+            parse_asm(result.code),
+            grid_dim=result.grid,
+            block_dim=result.block,
+        )
+
+        actual = np.asarray(
+            device.global_memory.read_floats(2 * n * 4, n), dtype=np.float32
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
 
 
 if __name__ == "__main__":

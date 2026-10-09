@@ -173,6 +173,8 @@ Exit criteria:
 - imported ResNet18 and GPT-2 block lower to `mgpu.isa`,
 - pipeline failure messages include op, pass, shape, and dtype.
 
+Status: **implemented for single-linalg-op model fragments**
+
 ### 4.6 ISA/codegen scalability
 
 Remove hard-coded small-workload assumptions.
@@ -195,6 +197,8 @@ Exit criteria:
 - `n > 32` elementwise tests run in waves,
 - conv/reduction emit bounded-size ISA for large tensors,
 - generated ISA still matches NumPy references.
+
+Status: **partially implemented (grid-aware elementwise and wave execution)**
 
 ### 4.7 Runtime launch queue and synchronization
 
