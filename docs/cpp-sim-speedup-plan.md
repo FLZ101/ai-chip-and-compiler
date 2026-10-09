@@ -76,6 +76,63 @@ Rules:
 - The mgpu implementation remains available behind `MGPU_CPP_SIM=1` for
   simulator fidelity and debugging.
 
+### 3.2 Verification workflow
+
+Every software kernel is verified in three directions:
+
+1. **Against the mgpu implementation**
+
+   Run the same operator through both paths with the same input tensors and
+   the same planned buffer offsets:
+
+   ```text
+   mgpu ISA kernel -> simulator -> output_mgpu
+   software kernel -> simulator global memory -> output_sw
+   assert allclose(output_mgpu, output_sw)
+   ```
+
+2. **Against an independent reference**
+
+   Use PyTorch/NumPy for the same operator:
+
+   ```text
+   assert allclose(output_mgpu, reference)
+   assert allclose(output_sw, reference)
+   ```
+
+   This catches cases where both implementations agree but are both wrong.
+
+3. **Reverse verification / software oracle**
+
+   For very large shapes where the mgpu interpreter is too slow, run:
+
+   ```text
+   software output vs PyTorch on the large shape
+   mgpu output vs software output on a small equivalent shape
+   ```
+
+   This keeps software kernels honest on large models while still proving
+   mgpu equivalence on tractable shapes.
+
+Recommended test matrix:
+
+| Dimension | Coverage |
+| --- | --- |
+| shape | small, medium, ResNet18-like |
+| dtype | f32 first, then f16/bf16/f8/i8 |
+| stride/pad/dilation | 1/1/1, 2/1/1, 2/3/1, 2/1/2 |
+| bias | with and without |
+| batch | 1 first, then >1 |
+| layout | NCHW |
+| malformed input | matching error classes where applicable |
+
+Exit:
+
+- every software kernel has a differential test,
+- every operator has at least one mgpu-vs-software test,
+- full-model runner compares both implementations on a cropped model before
+  using software-only execution for the full 224x224 model.
+
 Most full-model time is in:
 
 - scalar `conv_reduce_loop`,
