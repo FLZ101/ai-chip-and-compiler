@@ -140,6 +140,31 @@ class TestHardwareScalingEndToEnd(unittest.TestCase):
         )
         self.assertIn("conv_reduce_loop", result.isa_text)
 
+    def test_runtime_launch_queue_executes_fifo(self):
+        driver = Driver(global_size=1 << 20, sm_count=4)
+        first = driver.allocate((32,), alignment=4)
+        second = driver.allocate((32,), alignment=4)
+
+        def kernel(base, delta):
+            return parse_asm(f"""
+                MOV R0, tid.x
+                ADD R1, R0, {delta}
+                MUL R2, R0, 4
+                ADD R2, R2, {base}
+                STG [R2], R1
+                EXIT
+                """)
+
+        driver.enqueue(kernel(first.base_addr, 0), block_dim=(32,))
+        driver.enqueue(kernel(second.base_addr, 100), block_dim=(32,))
+        driver.synchronize()
+
+        np.testing.assert_array_equal(first.read(), np.arange(32, dtype=np.float32))
+        np.testing.assert_array_equal(
+            second.read(), np.arange(32, dtype=np.float32) + 100.0
+        )
+        self.assertEqual(len(driver.profiler.records), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

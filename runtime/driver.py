@@ -35,6 +35,7 @@ class Driver:
         self._buffers: dict[str, Buffer] = {}
         self._next_buffer_id = 0
         self._cursor = 0
+        self._queue: list[tuple[Program, tuple[int, ...], tuple[int, ...], bool]] = []
 
     @property
     def clock(self) -> int:
@@ -89,21 +90,44 @@ class Driver:
         block_dim: tuple[int, ...] = (1,),
         profile: bool = False,
     ) -> ProfileCounters | None:
+        self.enqueue(program, grid_dim=grid_dim, block_dim=block_dim, profile=profile)
+        return self.flush()
+
+    def enqueue(
+        self,
+        program: Program | str,
+        *,
+        grid_dim: tuple[int, ...] = (1,),
+        block_dim: tuple[int, ...] = (1,),
+        profile: bool = False,
+    ) -> None:
+        """Queue one kernel for later execution by :meth:`flush`."""
         parsed = program if isinstance(program, Program) else parse_asm(program)
-        snapshot = launch(
-            self.device,
-            parsed,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
-            profile=profile,
-        )
-        self.profiler.add(LaunchRecord(cycles=self.device.clock, profile=snapshot))
-        return snapshot
+        self._queue.append((parsed, tuple(grid_dim), tuple(block_dim), profile))
+
+    def flush(self) -> ProfileCounters | None:
+        """Execute all queued kernels in FIFO order."""
+        last_snapshot = None
+        while self._queue:
+            program, grid_dim, block_dim, profile = self._queue.pop(0)
+            last_snapshot = launch(
+                self.device,
+                program,
+                grid_dim=grid_dim,
+                block_dim=block_dim,
+                profile=profile,
+            )
+            self.profiler.add(
+                LaunchRecord(cycles=self.device.clock, profile=last_snapshot)
+            )
+        return last_snapshot
+
+    def synchronize(self) -> None:
+        """Block until all previously queued work has completed."""
+        self.flush()
 
     def sync(self) -> None:
-        # The current simulator executes synchronously; this method preserves
-        # the host API for later asynchronous execution.
-        return None
+        self.synchronize()
 
     def _get_buffer(self, buffer: Buffer | str) -> Buffer:
         if isinstance(buffer, Buffer):

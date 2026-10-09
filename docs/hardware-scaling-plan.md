@@ -220,6 +220,8 @@ Exit criteria:
 - synchronization does not corrupt state,
 - profiler reports per-launch and aggregate cycles.
 
+Status: **implemented**
+
 ## 5. Milestones
 
 ### M1: Configurable resources
