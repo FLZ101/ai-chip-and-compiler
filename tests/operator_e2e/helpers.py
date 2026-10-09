@@ -459,6 +459,9 @@ def run_software_model_e2e(
                 file=sys.stderr,
                 flush=True,
             )
+        if node.op == Op.ADD and node.inputs[0].shape != node.inputs[1].shape:
+            _run_python_software_node(device, node, layout)
+            continue
         try:
             request = _software_request(node, layout)
         except NotImplementedError:
@@ -509,6 +512,12 @@ def _run_python_software_node(
         value = _read_node_input(device, node.inputs[0], layout)
         perm = node.attrs.get("perm", tuple(reversed(range(value.ndim))))
         _write_node_output(device, output, layout, np.transpose(value, perm))
+        return
+
+    if op == Op.ADD:
+        left = _read_node_input(device, node.inputs[0], layout)
+        right = _read_node_input(device, node.inputs[1], layout)
+        _write_node_output(device, output, layout, np.add(left, right))
         return
 
     if op == Op.CONCAT:

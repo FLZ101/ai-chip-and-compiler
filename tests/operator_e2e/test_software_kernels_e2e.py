@@ -216,6 +216,38 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
         frontend.output(frontend.add(lhs, rhs))
         self._assert_equivalent(frontend.build(), {"a": a, "b": b}, a + b)
 
+    def test_positional_broadcast_add_software_reference(self):
+        token = np.arange(12, dtype=np.float32).reshape(1, 3, 4)
+        positional = np.arange(12, dtype=np.float32).reshape(1, 3, 4)
+        frontend = ManualFrontend("positional_add")
+        x = frontend.add_input("token", DType.F32, token.shape)
+        pos = frontend.add_input("pos", DType.F32, positional.shape)
+        frontend.output(frontend.add(x, pos))
+        expected = token + positional
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 16, sm_count=4),
+            frontend.build(),
+            {"token": token, "pos": positional},
+            [expected],
+        )
+        np.testing.assert_allclose(result.outputs[0], expected)
+
+    def test_seq_hidden_broadcast_add_software_reference(self):
+        token = np.arange(12, dtype=np.float32).reshape(1, 3, 4)
+        positional = np.arange(12, dtype=np.float32).reshape(3, 4)
+        frontend = ManualFrontend("seq_positional_add")
+        x = frontend.add_input("token", DType.F32, token.shape)
+        pos = frontend.add_input("pos", DType.F32, positional.shape)
+        frontend.output(frontend.add(x, pos))
+        expected = token + positional
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 16, sm_count=4),
+            frontend.build(),
+            {"token": token, "pos": positional},
+            [expected],
+        )
+        np.testing.assert_allclose(result.outputs[0], expected)
+
     def test_batch_norm_software_matches_mgpu(self):
         rng = np.random.default_rng(5)
         x = rng.normal(size=(1, 2, 3, 3)).astype(np.float32)
