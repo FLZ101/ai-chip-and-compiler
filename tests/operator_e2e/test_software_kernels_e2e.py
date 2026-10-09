@@ -317,6 +317,37 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
             result.outputs[0], np.argmax(logits, axis=-1).astype(np.int32)
         )
 
+    def test_large_attention_software_reference(self):
+        rng = np.random.default_rng(17)
+        q = rng.normal(size=(1, 12, 8, 64)).astype(np.float32)
+        k = rng.normal(size=(1, 12, 8, 64)).astype(np.float32)
+        v = rng.normal(size=(1, 12, 8, 64)).astype(np.float32)
+        mask = np.tril(np.ones((8, 8), dtype=np.float32)).reshape(1, 1, 8, 8)
+        scale = 1.0 / np.sqrt(64.0)
+        frontend = ManualFrontend("masked_attention_large")
+        qv = frontend.add_input("q", DType.F32, q.shape)
+        kv = frontend.add_input("k", DType.F32, k.shape)
+        vv = frontend.add_input("v", DType.F32, v.shape)
+        mv = frontend.add_input("mask", DType.F32, mask.shape)
+        frontend.output(frontend.masked_attention(qv, kv, vv, mv, scale=scale))
+
+        scores = np.matmul(q, np.swapaxes(k, -1, -2)) * scale
+        scores = np.where(mask == 0, -np.inf, scores)
+        scores = scores - np.max(scores, axis=-1, keepdims=True)
+        weights = np.exp(scores)
+        weights = weights / np.sum(weights, axis=-1, keepdims=True)
+        expected = np.matmul(weights, v)
+
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 20, sm_count=4),
+            frontend.build(),
+            {"q": q, "k": k, "v": v, "mask": mask},
+            [expected],
+            rtol=1e-4,
+            atol=1e-4,
+        )
+        np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-4, atol=1e-4)
+
     def test_resize_software_matches_mgpu(self):
         image = np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)
         frontend = ManualFrontend("resize")

@@ -652,8 +652,9 @@ def _run_python_software_node(
         q = _read_node_input(device, node.inputs[0], layout)
         k = _read_node_input(device, node.inputs[1], layout)
         v = _read_node_input(device, node.inputs[2], layout)
-        scale = float(node.attrs.get("scale", q.shape[-1] ** 0.5))
-        scores = np.matmul(q, np.swapaxes(k, -1, -2)) / scale
+        default_scale = 1.0 / np.sqrt(q.shape[-1])
+        scale = float(node.attrs.get("scale", default_scale))
+        scores = np.matmul(q, np.swapaxes(k, -1, -2)) * scale
         if op == Op.MASKED_ATTENTION:
             mask = _read_node_input(device, node.inputs[3], layout)
             scores = np.where(mask == 0, -1e30, scores)
