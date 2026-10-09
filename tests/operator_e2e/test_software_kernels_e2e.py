@@ -380,6 +380,48 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
         )
         np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-4, atol=1e-4)
 
+    def test_decomposed_attention_software_reference(self):
+        rng = np.random.default_rng(29)
+        q = rng.normal(size=(1, 2, 3, 4)).astype(np.float32)
+        k = rng.normal(size=(1, 2, 3, 4)).astype(np.float32)
+        v = rng.normal(size=(1, 2, 3, 4)).astype(np.float32)
+        scale = 1.0 / np.sqrt(4.0)
+
+        frontend = ManualFrontend("decomposed_attention")
+        qv = frontend.add_input("q", DType.F32, q.shape)
+        kv = frontend.add_input("k", DType.F32, k.shape)
+        vv = frontend.add_input("v", DType.F32, v.shape)
+        scale_value = frontend.add_input("scale", DType.F32, ())
+        kt = frontend.transpose(kv, (0, 1, 3, 2))
+        scores = frontend.matmul(qv, kt)
+        scores = frontend.mul(scores, scale_value)
+        mask = frontend.causal_mask(query_len=3, key_len=3, batch=1)
+        weights = frontend.masked_softmax(scores, mask)
+        output = frontend.matmul(weights, vv)
+        frontend.output(output)
+
+        expected_scores = np.matmul(q, np.swapaxes(k, -1, -2)) * scale
+        causal = np.tril(np.ones((3, 3), dtype=np.float32)).reshape(1, 1, 3, 3)
+        expected_scores = np.where(causal == 0, -1e30, expected_scores)
+        expected_scores = expected_scores - np.max(
+            expected_scores, axis=-1, keepdims=True
+        )
+        expected_weights = np.exp(expected_scores)
+        expected_weights = expected_weights / np.sum(
+            expected_weights, axis=-1, keepdims=True
+        )
+        expected = np.matmul(expected_weights, v)
+
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 20, sm_count=4),
+            frontend.build(),
+            {"q": q, "k": k, "v": v, "scale": np.asarray(scale, dtype=np.float32)},
+            [expected],
+            rtol=1e-4,
+            atol=1e-4,
+        )
+        np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-4, atol=1e-4)
+
     def test_large_linear_software_reference(self):
         rng = np.random.default_rng(23)
         x = rng.normal(size=(128, 256)).astype(np.float32)

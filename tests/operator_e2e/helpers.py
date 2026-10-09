@@ -462,6 +462,11 @@ def run_software_model_e2e(
         if node.op == Op.ADD and node.inputs[0].shape != node.inputs[1].shape:
             _run_python_software_node(device, node, layout)
             continue
+        if node.op == Op.MATMUL and (
+            node.inputs[0].rank != 2 or node.inputs[1].rank != 2
+        ):
+            _run_python_software_node(device, node, layout)
+            continue
         try:
             request = _software_request(node, layout)
         except NotImplementedError:
@@ -518,6 +523,18 @@ def _run_python_software_node(
         left = _read_node_input(device, node.inputs[0], layout)
         right = _read_node_input(device, node.inputs[1], layout)
         _write_node_output(device, output, layout, np.add(left, right))
+        return
+
+    if op == Op.MUL:
+        left = _read_node_input(device, node.inputs[0], layout)
+        right = _read_node_input(device, node.inputs[1], layout)
+        _write_node_output(device, output, layout, np.multiply(left, right))
+        return
+
+    if op == Op.MATMUL:
+        left = _read_node_input(device, node.inputs[0], layout)
+        right = _read_node_input(device, node.inputs[1], layout)
+        _write_node_output(device, output, layout, np.matmul(left, right))
         return
 
     if op == Op.CONCAT:
