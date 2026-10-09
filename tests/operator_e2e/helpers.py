@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -259,3 +260,197 @@ EXIT
 def make_device(global_size: int = 1 << 20, sm_count: int = 4) -> Device:
     """Create the default device used by operator E2E tests."""
     return create_device(global_size=global_size, sm_count=sm_count)
+
+
+def _pair(value: int | tuple[int, int]) -> tuple[int, int]:
+    if isinstance(value, tuple):
+        return int(value[0]), int(value[1])
+    return int(value), int(value)
+
+
+def _software_request(
+    node: object,
+    layout: MemoryLayout,
+) -> dict[str, object]:
+    op = node.op
+    values = node.inputs
+    output = node.outputs[0]
+
+    def offset(value: object) -> int:
+        return layout[value.name].base_addr
+
+    if op == Op.CONV2D:
+        strides = _pair(node.attrs.get("strides", 1))
+        padding = _pair(node.attrs.get("padding", 0))
+        dilation = _pair(node.attrs.get("dilation", 1))
+        has_bias = len(values) == 3
+        return {
+            "op": "conv2d",
+            "input_shape": values[0].shape,
+            "weight_shape": values[1].shape,
+            "output_shape": output.shape,
+            "strides": strides,
+            "paddings": padding,
+            "dilations": dilation,
+            "has_bias": has_bias,
+            "input_offset": offset(values[0]),
+            "weight_offset": offset(values[1]),
+            "bias_offset": offset(values[2]) if has_bias else 0,
+            "output_offset": offset(output),
+        }
+    if op == Op.MATMUL:
+        return {
+            "op": "matmul",
+            "input_shape": values[0].shape,
+            "weight_shape": values[1].shape,
+            "output_shape": output.shape,
+            "input_offset": offset(values[0]),
+            "weight_offset": offset(values[1]),
+            "bias_offset": 0,
+            "output_offset": offset(output),
+        }
+    if op == Op.LINEAR:
+        has_bias = len(values) == 3
+        return {
+            "op": "linear",
+            "input_shape": values[0].shape,
+            "weight_shape": values[1].shape,
+            "output_shape": output.shape,
+            "has_bias": has_bias,
+            "input_offset": offset(values[0]),
+            "weight_offset": offset(values[1]),
+            "bias_offset": offset(values[2]) if has_bias else 0,
+            "output_offset": offset(output),
+        }
+    if op == Op.RELU:
+        return {
+            "op": "relu",
+            "input_shape": values[0].shape,
+            "output_shape": output.shape,
+            "input_offset": offset(values[0]),
+            "output_offset": offset(output),
+        }
+    if op == Op.ADD:
+        return {
+            "op": "add",
+            "input_shape": values[0].shape,
+            "output_shape": output.shape,
+            "input_offset": offset(values[0]),
+            "input2_offset": offset(values[1]),
+            "output_offset": offset(output),
+        }
+    if op == Op.BATCH_NORM:
+        return {
+            "op": "batch_norm",
+            "input_shape": values[0].shape,
+            "weight_shape": values[1].shape,
+            "output_shape": output.shape,
+            "epsilon": float(node.attrs.get("epsilon", 1e-5)),
+            "input_offset": offset(values[0]),
+            "weight_offset": offset(values[1]),
+            "bias_offset": offset(values[2]),
+            "mean_offset": offset(values[3]),
+            "var_offset": offset(values[4]),
+            "output_offset": offset(output),
+        }
+    if op == Op.GLOBAL_AVG_POOL:
+        return {
+            "op": "global_avg_pool",
+            "input_shape": values[0].shape,
+            "output_shape": output.shape,
+            "input_offset": offset(values[0]),
+            "output_offset": offset(output),
+        }
+    if op in {Op.MAX_POOL2D, Op.AVG_POOL2D}:
+        kernel = _pair(node.attrs.get("kernel", 2))
+        strides = _pair(node.attrs.get("strides", kernel))
+        padding = _pair(node.attrs.get("padding", 0))
+        return {
+            "op": "max_pool2d" if op == Op.MAX_POOL2D else "avg_pool2d",
+            "input_shape": values[0].shape,
+            "output_shape": output.shape,
+            "strides": strides,
+            "paddings": padding,
+            "dilations": (1, 1),
+            "kernel": kernel,
+            "input_offset": offset(values[0]),
+            "output_offset": offset(output),
+        }
+    if op == Op.PAD:
+        pads = tuple(node.attrs.get("pads", ((0, 0),)))
+        before = int(pads[2][0]) if len(pads) > 2 else int(pads[0][0])
+        after = int(pads[2][1]) if len(pads) > 2 else int(pads[0][1])
+        return {
+            "op": "pad",
+            "input_shape": values[0].shape,
+            "output_shape": output.shape,
+            "paddings": (before, after),
+            "input_offset": offset(values[0]),
+            "output_offset": offset(output),
+        }
+    if op == Op.RESHAPE:
+        return {
+            "op": "reshape",
+            "input_shape": values[0].shape,
+            "output_shape": output.shape,
+            "input_offset": offset(values[0]),
+            "output_offset": offset(output),
+        }
+    raise NotImplementedError(f"no software kernel for {op.value!r}")
+
+
+def run_software_model_e2e(
+    device: Device,
+    graph: Graph,
+    inputs: dict[str, np.ndarray],
+    expected: list[np.ndarray] | ReferenceFn | None = None,
+    *,
+    progress: bool = False,
+    rtol: float = 1e-5,
+    atol: float = 1e-6,
+) -> OperatorE2EResult:
+    cpp_sim_dir = Path(__file__).resolve().parents[2] / ".deps" / "cpp-sim-build"
+    if str(cpp_sim_dir) not in sys.path:
+        sys.path.insert(0, str(cpp_sim_dir))
+    import cpp_sim
+
+    graph.validate()
+    if set(inputs) != {value.name for value in graph.inputs}:
+        raise ValueError("inputs must match graph inputs")
+    for value in graph.inputs:
+        array = np.asarray(inputs[value.name])
+        if tuple(array.shape) != value.shape:
+            raise ValueError(
+                f"input {value.name!r} has shape {array.shape}, expected {value.shape}"
+            )
+
+    intermediate_tensors = {
+        value.name: np.zeros(value.shape, dtype=np.float32)
+        for node in graph.nodes
+        for value in node.outputs
+    }
+    layout = allocate_global_buffers(device, {**inputs, **intermediate_tensors})
+
+    for index, node in enumerate(graph.nodes, 1):
+        if progress:
+            print(
+                f"[model-e2e] software op {index}/{len(graph.nodes)}: "
+                f"{node.op.value} -> {[value.name for value in node.outputs]}",
+                file=sys.stderr,
+                flush=True,
+            )
+        request = _software_request(node, layout)
+        if not cpp_sim.software_run(device.global_memory.data, request):
+            raise NotImplementedError(f"unsupported software op: {node.op.value}")
+
+    outputs = [read_tensor(device, layout[value.name]) for value in graph.outputs]
+    if expected is not None:
+        golden = expected(inputs) if callable(expected) else expected
+        compare_against_numpy(outputs, golden, rtol=rtol, atol=atol)
+    return OperatorE2EResult(
+        outputs=outputs,
+        mlir_text="software model runner",
+        isa_text="",
+        cycles=0,
+        profile=None,
+    )

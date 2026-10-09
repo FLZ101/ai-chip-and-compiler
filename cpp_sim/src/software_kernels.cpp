@@ -232,9 +232,13 @@ void run_pad(ByteMemory &memory, const SoftwareKernelRequest &r) {
   }
 }
 
-void run_reshape(ByteMemory &, const SoftwareKernelRequest &) {
-  // Reshape only changes the logical shape.  The bytes remain contiguous and
-  // therefore already in the correct location.
+void run_reshape(ByteMemory &memory, const SoftwareKernelRequest &r) {
+  int64_t numel = 1;
+  for (int64_t dim : r.input_shape)
+    numel *= dim;
+  for (int64_t i = 0; i < numel; ++i)
+    memory.write_f32(r.output_offset + i * 4,
+                     memory.read_f32(r.input_offset + i * 4));
 }
 
 } // namespace

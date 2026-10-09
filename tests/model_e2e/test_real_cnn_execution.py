@@ -21,7 +21,11 @@ from compiler.codegen import lower_kernel
 from compiler.frontends import TorchFXFrontend
 from compiler.model_ir import DType
 
-from tests.operator_e2e.helpers import make_device, run_operator_e2e
+from tests.operator_e2e.helpers import (
+    make_device,
+    run_operator_e2e,
+    run_software_model_e2e,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _PROJECT_RESNET18_WEIGHTS = (
@@ -169,6 +173,40 @@ class TestRealCNNExecution(unittest.TestCase):
 
         self.assertGreater(result.cycles, 0)
         self.assertIsNotNone(result.profile)
+        np.testing.assert_allclose(
+            result.outputs[0],
+            expected,
+            atol=5e-3,
+            rtol=5e-3,
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("MGPU_FULL_RESNET18") == "1",
+        "full ResNet18 software execution is opt-in",
+    )
+    def test_full_resnet18_software_forward(self):
+        model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
+        graph_module = torch.fx.symbolic_trace(model)
+        frontend = TorchFXFrontend(
+            "resnet18",
+            input_shapes={"x": ((1, 3, 224, 224), DType.F32)},
+        )
+        graph = frontend.convert(graph_module)
+        x = np.random.default_rng(0).normal(size=(1, 3, 224, 224)).astype(np.float32)
+        inputs = _full_resnet18_inputs(model, graph, x)
+        with torch.no_grad():
+            expected = model(torch.from_numpy(x)).numpy()
+
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 27, sm_count=8),
+            graph,
+            inputs,
+            [expected],
+            progress=True,
+            rtol=5e-3,
+            atol=5e-3,
+        )
+
         np.testing.assert_allclose(
             result.outputs[0],
             expected,

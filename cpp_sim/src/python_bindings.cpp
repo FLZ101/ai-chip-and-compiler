@@ -74,12 +74,22 @@ bool software_run(py::buffer global_buffer, const py::dict &request_dict) {
   cpp_sim::SoftwareKernelRequest request;
   request.op = request_dict["op"].cast<std::string>();
   request.input_shape = to_i64_vector(request_dict["input_shape"].cast<py::tuple>());
-  request.weight_shape = to_i64_vector(request_dict["weight_shape"].cast<py::tuple>());
+  request.weight_shape = request_dict.contains("weight_shape")
+                             ? to_i64_vector(request_dict["weight_shape"].cast<py::tuple>())
+                             : std::vector<int64_t>{};
   request.output_shape = to_i64_vector(request_dict["output_shape"].cast<py::tuple>());
-  request.strides = to_i64_vector(request_dict["strides"].cast<py::tuple>());
-  request.paddings = to_i64_vector(request_dict["paddings"].cast<py::tuple>());
-  request.dilations = to_i64_vector(request_dict["dilations"].cast<py::tuple>());
-  request.has_bias = request_dict["has_bias"].cast<bool>();
+  request.strides = request_dict.contains("strides")
+                        ? to_i64_vector(request_dict["strides"].cast<py::tuple>())
+                        : std::vector<int64_t>{1, 1};
+  request.paddings = request_dict.contains("paddings")
+                         ? to_i64_vector(request_dict["paddings"].cast<py::tuple>())
+                         : std::vector<int64_t>{0, 0};
+  request.dilations = request_dict.contains("dilations")
+                          ? to_i64_vector(request_dict["dilations"].cast<py::tuple>())
+                          : std::vector<int64_t>{1, 1};
+  request.has_bias = request_dict.contains("has_bias")
+                         ? request_dict["has_bias"].cast<bool>()
+                         : false;
   request.epsilon = request_dict.contains("epsilon")
                         ? request_dict["epsilon"].cast<double>()
                         : 1e-5;
@@ -87,8 +97,12 @@ bool software_run(py::buffer global_buffer, const py::dict &request_dict) {
   request.input2_offset = request_dict.contains("input2_offset")
                               ? request_dict["input2_offset"].cast<int64_t>()
                               : 0;
-  request.weight_offset = request_dict["weight_offset"].cast<int64_t>();
-  request.bias_offset = request_dict["bias_offset"].cast<int64_t>();
+  request.weight_offset = request_dict.contains("weight_offset")
+                              ? request_dict["weight_offset"].cast<int64_t>()
+                              : 0;
+  request.bias_offset = request_dict.contains("bias_offset")
+                            ? request_dict["bias_offset"].cast<int64_t>()
+                            : 0;
   request.mean_offset = request_dict.contains("mean_offset")
                             ? request_dict["mean_offset"].cast<int64_t>()
                             : 0;
