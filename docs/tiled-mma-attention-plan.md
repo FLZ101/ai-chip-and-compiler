@@ -30,16 +30,18 @@ shapes.
 
 ## 2. Current status
 
-Phases 1 through 3 are implemented and tested:
+Phases 1 through 4 are implemented and tested:
 
 - Phase 1: reusable fragment staging helpers.
 - Phase 2: tiled Q @ K^T score loops over query, key, and head-dimension
   tiles.
 - Phase 3: two-pass tiled softmax with explicit causal masking.
+- Phase 4: tiled value accumulation and global output writes.
 
 The original small-shape path still handles `seq <= 16` and `head_dim <= 16`.
-Large rank-4 attention falls back to `emitScalarAttentionIsa` until Phase 4
-adds tiled value accumulation.
+Large rank-4 attention still falls back to `emitScalarAttentionIsa` by
+default. The full tiled path is available under
+`--mgpu-emit-attention-tiled` and becomes the default in a later phase.
 
 ## 3. Design
 
@@ -173,7 +175,7 @@ Exit:
 The implementation uses a two-pass softmax over all key positions for each
 query row, then writes normalized weights back into the score tiles.
 
-### Phase 4: General tiled value accumulation
+### Phase 4: General tiled value accumulation — complete
 
 Generate value-tile loops over computed `head_dim` tile count:
 
@@ -184,11 +186,20 @@ output += normalized_score @ V_tile
 Files:
 
 - `mlir/mgpu/lib/mgpu/MGpuToIsaPass.cpp`
+- `tests/mlir/mgpu_to_isa_attention_tiled_full.mlir`
+- `tests/operator_e2e/test_tiled_attention_kernels_e2e.py`
 
 Exit:
 
-- full attention output matches PyTorch for multiple shapes,
-- `head_dim` not divisible by 16 is handled via padded V tiles.
+- full attention matches a NumPy reference for `seq=8`, `head_dim=64`,
+- full attention matches for `seq=32`, `head_dim=32`,
+- `head_dim=20` verifies padded V tiles,
+- generated ISA contains `value_q_tile_loop`, `value_v_tile_loop`,
+  `value_k_tile_loop`, and `STG`.
+
+The value stage loads normalized score tiles from shared memory, loads V
+tiles from global memory, accumulates with `MMA`, and stores only in-bounds
+output elements so padded rows/columns do not corrupt adjacent buffers.
 
 ### Phase 5: General loop and grid mapping
 
@@ -230,7 +241,7 @@ Exit:
 1. fragment staging helpers — complete
 2. tiled score computation — complete
 3. causal masking and softmax — complete
-4. tiled value accumulation
+4. tiled value accumulation — complete
 5. loop and grid mapping
 6. differential and lit tests
 ```
