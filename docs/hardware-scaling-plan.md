@@ -150,6 +150,8 @@ Exit criteria:
 - ResNet18 and GPT-2 block memory maps are generated deterministically,
 - the planner reports total bytes and peak live bytes.
 
+Status: **implemented (generic first-fit/lifetime planner)**
+
 ### 4.5 MLIR pipeline integration
 
 Wire the real linalg-on-tensors path into the Python driver.
