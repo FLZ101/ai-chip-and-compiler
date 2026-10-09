@@ -259,15 +259,18 @@ def MGPU_ConcatOp : MGPU_Op<"concat", [MemoryEffects<[MemRead, MemWrite]>]> {
 }
 
 def MGPU_SliceOp : MGPU_Op<"slice", [MemoryEffects<[MemRead, MemWrite]>]> {
-  let summary = "Slice one rank-1 buffer";
+  let summary = "Slice a buffer along arbitrary axes";
   let arguments = (ins AnyMemRef:$input,
                        AnyMemRef:$output,
-                       I64Attr:$start,
-                       I64Attr:$step);
+                       DenseI64ArrayAttr:$starts,
+                       DenseI64ArrayAttr:$ends,
+                       DenseI64ArrayAttr:$axes,
+                       DenseI64ArrayAttr:$steps);
   let results = (outs);
   let assemblyFormat = [{
     $input `,` $output
-    `start` `=` $start `,` `step` `=` $step
+    `starts` `=` $starts `,` `ends` `=` $ends `,` `axes` `=` $axes
+    `,` `steps` `=` $steps
     attr-dict
     `:` type($input) `,` type($output)
   }];

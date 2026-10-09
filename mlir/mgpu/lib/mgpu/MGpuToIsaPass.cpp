@@ -2457,22 +2457,60 @@ struct MGpuToIsaPass
     auto op = ops.front();
     auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
-    if (!inputType || !outType || inputType.getRank() != 1 ||
-        outType.getRank() != 1)
+    if (!inputType || !outType || inputType.getRank() != outType.getRank() ||
+        inputType.getRank() < 1 || inputType.getRank() > 3)
       return std::nullopt;
-    int64_t n = outType.getShape()[0];
-    int64_t start = op.getStart();
-    int64_t step = op.getStep();
+    int64_t rank = inputType.getRank();
+    auto starts = op.getStarts();
+    auto ends = op.getEnds();
+    auto axes = op.getAxes();
+    auto steps = op.getSteps();
+    SmallVector<int64_t> startByAxis(rank, 0);
+    SmallVector<int64_t> stepByAxis(rank, 1);
+    for (unsigned i = 0; i < axes.size(); ++i)
+      startByAxis[axes[i]] = starts[i];
+    for (unsigned i = 0; i < axes.size(); ++i)
+      stepByAxis[axes[i]] = steps[i];
+    int64_t n = outType.getNumElements();
     int64_t inputBase = bufferMap.base(op.getInput());
     int64_t outBase = bufferMap.base(op.getOutput());
 
     std::string code;
     llvm::raw_string_ostream os(code);
     emitCnnPrologue(os, n);
-    os << "MOV R2, R0\n"
-       << "MUL R2, R2, " << step << "\n"
-       << "ADD R2, R2, " << start << "\n"
-       << "MUL R2, R2, 4\n"
+    if (rank == 1) {
+      os << "MUL R2, R0, " << stepByAxis[0] << "\n"
+         << "ADD R2, R2, " << startByAxis[0] << "\n";
+    } else if (rank == 2) {
+      os << "IDIV R1, R0, " << outType.getShape()[1] << "\n"
+         << "MUL R2, R1, " << outType.getShape()[1] << "\n"
+         << "SUB R3, R0, R2\n"
+         << "MUL R1, R1, " << stepByAxis[0] << "\n"
+         << "ADD R1, R1, " << startByAxis[0] << "\n"
+         << "MUL R3, R3, " << stepByAxis[1] << "\n"
+         << "ADD R3, R3, " << startByAxis[1] << "\n"
+         << "MUL R2, R1, " << inputType.getShape()[1] << "\n"
+         << "ADD R2, R2, R3\n";
+    } else {
+      int64_t mid = outType.getShape()[1] * outType.getShape()[2];
+      os << "IDIV R1, R0, " << mid << "\n"
+         << "MUL R2, R1, " << mid << "\n"
+         << "SUB R4, R0, R2\n"
+         << "IDIV R3, R4, " << outType.getShape()[2] << "\n"
+         << "MUL R5, R3, " << outType.getShape()[2] << "\n"
+         << "SUB R6, R4, R5\n"
+         << "MUL R1, R1, " << stepByAxis[0] << "\n"
+         << "ADD R1, R1, " << startByAxis[0] << "\n"
+         << "MUL R3, R3, " << stepByAxis[1] << "\n"
+         << "ADD R3, R3, " << startByAxis[1] << "\n"
+         << "MUL R6, R6, " << stepByAxis[2] << "\n"
+         << "ADD R6, R6, " << startByAxis[2] << "\n"
+         << "MUL R2, R1, " << inputType.getShape()[1] << "\n"
+         << "ADD R2, R2, R3\n"
+         << "MUL R2, R2, " << inputType.getShape()[2] << "\n"
+         << "ADD R2, R2, R6\n";
+    }
+    os << "MUL R2, R2, 4\n"
        << "ADD R2, R2, " << inputBase << "\n"
        << "LDG R4, [R2]\n"
        << "MUL R5, R0, 4\n"

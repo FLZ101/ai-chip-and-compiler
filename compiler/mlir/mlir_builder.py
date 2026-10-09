@@ -416,12 +416,14 @@ class MLIRBuilder:
             value = node.inputs[0]
             output = node.outputs[0]
             starts = tuple(node.attrs.get("starts", (0,)))
+            ends = tuple(node.attrs.get("ends", tuple(output.shape)))
+            axes = tuple(node.attrs.get("axes", tuple(range(value.rank))))
             steps = tuple(node.attrs.get("steps", (1,)))
-            start = int(starts[0])
-            step = int(steps[0])
             return [
                 f"{indent}mgpu.slice {self._value_names[value.name]}, "
-                f"{result_name} start = {start}, step = {step} : "
+                f"{result_name} starts = {_dense_i64(starts)}, "
+                f"ends = {_dense_i64(ends)}, axes = {_dense_i64(axes)}, "
+                f"steps = {_dense_i64(steps)} : "
                 f"{self._memref_type(value)}, {self._memref_type(output)}"
             ]
         if node.op == Op.PAD:
@@ -1243,6 +1245,10 @@ def _dense_i64_2(value: tuple[int, int]) -> str:
     if value[0] == value[1]:
         return f"dense<{value[0]}> : tensor<2xi64>"
     return f"dense<[{value[0]}, {value[1]}]> : tensor<2xi64>"
+
+
+def _dense_i64(values: tuple[int, ...]) -> str:
+    return "[" + ", ".join(str(int(value)) for value in values) + "]"
 
 
 def _mlir_float(value: float) -> str:

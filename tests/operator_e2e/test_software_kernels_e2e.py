@@ -295,6 +295,13 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
         expected = image.repeat(2, axis=2).repeat(2, axis=3)
         self._assert_equivalent(frontend.build(), {"x": image}, expected)
 
+    def test_slice_software_matches_mgpu(self):
+        image = np.arange(20, dtype=np.float32).reshape(4, 5)
+        frontend = ManualFrontend("slice")
+        x = frontend.add_input("x", DType.F32, image.shape)
+        frontend.output(frontend.slice(x, starts=(1, 1), ends=(4, 4), axes=(0, 1)))
+        self._assert_equivalent(frontend.build(), {"x": image}, image[1:4, 1:4])
+
     def test_transpose_software_matches_mgpu(self):
         image = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
         frontend = ManualFrontend("transpose")
