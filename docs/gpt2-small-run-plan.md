@@ -33,15 +33,20 @@ Already available:
 - typed runtime buffers and lifetime-aware memory planner.
 - wave block scheduler and runtime launch queue.
 - INT8/INT4/FP8 typed memory and quantized matmul support.
+- native software full-model runner used by ResNet18.
+- software kernels for matmul/linear, conv, batch norm, ReLU, add, pooling,
+  reshape, transpose, concat, slice, resize, softmax, masked softmax,
+  layer norm, RMS norm, rope, KV cache, and attention.
+- mgpu-vs-software differential tests for the supported operators.
 
 Missing for full GPT-2:
 
 - full-module import with `use_cache=False` and static sequence,
 - token/position embedding lowering,
-- multi-head attention,
+- generalized mgpu multi-head attention for `heads=12` and `head_dim=64`,
+- software embedding/gather and argmax operators,
 - large matmul/linear execution,
 - model-wide memory plan and KV-cache planning,
-- argmax/token selection,
 - autoregressive loop orchestration.
 
 ## 3. Target sizes
@@ -94,7 +99,8 @@ Add or complete Model IR / target ops:
 - reshape/transpose/split,
 - multi-head attention decomposition,
 - final `Linear`,
-- `argmax`.
+- `argmax`,
+- `embedding gather`.
 
 Files:
 
@@ -108,6 +114,8 @@ Exit criteria:
 
 - every op in the GPT-2 forward graph has a target lowering,
 - unsupported ops fail with op/shape/dtype diagnostics.
+- every software kernel has a differential test against its mgpu
+  implementation where the mgpu shape is supported.
 
 ### Phase C: Multi-head attention
 
@@ -125,6 +133,8 @@ q,k,v projections
 ```
 
 First use scalar/grid-aware matmul.  Add `mgpu.mma` as an optimization later.
+Keep the software attention implementation as the fast full-model path and
+the mgpu decomposed attention as the correctness oracle for small shapes.
 
 Files:
 
@@ -135,6 +145,8 @@ Files:
 Exit criteria:
 
 - `batch=1`, `heads=12`, `seq<=16`, `head_dim=64` attention matches PyTorch,
+- software attention matches PyTorch on larger GPT-2-like shapes,
+- mgpu attention matches software attention on a cropped equivalent shape,
 - causal mask produces correct triangular attention,
 - ISA uses bounded loops rather than unrolled head dimensions.
 
