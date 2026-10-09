@@ -14,6 +14,7 @@ lowering is included here as the first reference implementation.
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 from typing import Callable
 
@@ -123,6 +124,7 @@ def run_operator_e2e(
     *,
     lowering: LoweringFn,
     profile: bool = False,
+    progress: bool = False,
     rtol: float = 1e-5,
     atol: float = 1e-6,
 ) -> OperatorE2EResult:
@@ -153,6 +155,14 @@ def run_operator_e2e(
     layout = allocate_global_buffers(device, {**inputs, **intermediate_tensors})
 
     if len(graph.nodes) == 1:
+        if progress:
+            node = graph.nodes[0]
+            print(
+                f"[model-e2e] op 1/1: {node.op.value} -> "
+                f"{[value.name for value in node.outputs]}",
+                file=sys.stderr,
+                flush=True,
+            )
         isa_text, (grid_dim, block_dim) = lowering(graph, mlir_text, layout)
         program = parse_asm(isa_text)
         profile_snapshot = launch(
@@ -165,7 +175,14 @@ def run_operator_e2e(
     else:
         isa_parts: list[str] = []
         profile_snapshot = None
-        for node in graph.nodes:
+        for index, node in enumerate(graph.nodes, 1):
+            if progress:
+                print(
+                    f"[model-e2e] op {index}/{len(graph.nodes)}: "
+                    f"{node.op.value} -> {[value.name for value in node.outputs]}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             subgraph = Graph(
                 name=node.name,
                 inputs=list(node.inputs),

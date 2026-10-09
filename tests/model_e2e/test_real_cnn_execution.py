@@ -164,6 +164,7 @@ class TestRealCNNExecution(unittest.TestCase):
             atol=5e-3,
             rtol=5e-3,
             profile=True,
+            progress=True,
         )
 
         self.assertGreater(result.cycles, 0)
