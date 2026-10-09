@@ -3218,6 +3218,13 @@ struct MGpuToIsaPass
        << cBase << "\n";
   }
 
+  static void emitStoreFullTile(llvm::raw_ostream &os, int sourceBase,
+                                int64_t sharedOffset) {
+    for (int slot = 0; slot < 8; ++slot)
+      emitStoreTileToShared(os, sourceBase + slot, slot / 4, slot % 4,
+                            sharedOffset);
+  }
+
   static void emitStoreSharedFragment(llvm::raw_ostream &os, int source,
                                       int rowGroup, int colGroup,
                                       int64_t offset) {
