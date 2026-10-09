@@ -117,12 +117,33 @@ class ModelIRError(Exception):
 
 
 @dataclass(frozen=True)
+class SourceLocation:
+    """Optional source/debug metadata attached to values and nodes."""
+
+    op: str = ""
+    shape: tuple[int, ...] = ()
+    dtype: DType | str = DType.F32
+    pass_name: str = "model-ir"
+    location: str = ""
+
+    def format(self) -> str:
+        dtype = self.dtype.value if isinstance(self.dtype, DType) else self.dtype
+        shape_text = "x".join(str(dim) for dim in self.shape)
+        return (
+            f"[op={self.op or '?'}, shape={shape_text or '?'}, "
+            f"dtype={dtype or '?'}, pass={self.pass_name or '?'}, "
+            f"loc={self.location or '?'}]"
+        )
+
+
+@dataclass(frozen=True)
 class Value:
     """A typed SSA value."""
 
     name: str
     dtype: DType
     shape: tuple[int, ...]
+    source: SourceLocation | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -152,6 +173,7 @@ class Node:
     inputs: list[Value] = field(default_factory=list)
     outputs: list[Value] = field(default_factory=list)
     attrs: dict[str, Any] = field(default_factory=dict)
+    source: SourceLocation | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -177,7 +199,12 @@ class Graph:
     _value_counter: int = field(default=0, init=False, repr=False)
 
     def add_input(self, name: str, dtype: DType | str, shape: tuple[int, ...]) -> Value:
-        value = Value(name, _as_dtype(dtype), tuple(shape))
+        value = Value(
+            name,
+            _as_dtype(dtype),
+            tuple(shape),
+            SourceLocation(op="input", shape=tuple(shape), dtype=_as_dtype(dtype)),
+        )
         if value.name in {existing.name for existing in self.inputs}:
             raise ModelIRError(f"duplicate graph input name: {value.name}")
         self.inputs.append(value)
@@ -190,6 +217,7 @@ class Graph:
         attrs: dict[str, Any] | None = None,
         *,
         name: str | None = None,
+        source: SourceLocation | None = None,
     ) -> list[Value]:
         """Infer outputs for ``op`` and append a new SSA node.
 
@@ -218,6 +246,7 @@ class Graph:
             inputs=input_values,
             outputs=output_values,
             attrs=node_attrs,
+            source=source,
         )
         self.nodes.append(node)
         return output_values
@@ -803,6 +832,10 @@ def _require_arity(op: Op, values: list[Value], minimum: int, maximum: int) -> N
         raise ModelIRError(f"{op.value} expects {expected} inputs, got {len(values)}")
 
 
+def _source_suffix(source: SourceLocation | None) -> str:
+    return f" {source.format()}" if source else ""
+
+
 def _validate_graph(graph: Graph) -> None:
     if not graph.name:
         raise ModelIRError("graph name must not be empty")
@@ -823,6 +856,7 @@ def _validate_graph(graph: Graph) -> None:
             if value.name not in defined:
                 raise ModelIRError(
                     f"node {node.name} reads undefined value {value.name}"
+                    f"{_source_suffix(node.source)}"
                 )
 
         expected = infer_node_outputs(node.op, node.inputs, node.attrs)
@@ -830,6 +864,7 @@ def _validate_graph(graph: Graph) -> None:
             raise ModelIRError(
                 f"node {node.name} has {len(node.outputs)} outputs, "
                 f"expected {len(expected)}"
+                f"{_source_suffix(node.source)}"
             )
 
         for value, (dtype, shape) in zip(node.outputs, expected):
@@ -840,6 +875,7 @@ def _validate_graph(graph: Graph) -> None:
                     f"node {node.name} output {value.name} has "
                     f"({value.dtype.value}, {value.shape}), "
                     f"expected ({dtype.value}, {shape})"
+                    f"{_source_suffix(node.source)}"
                 )
             defined[value.name] = value
 

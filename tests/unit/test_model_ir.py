@@ -6,6 +6,7 @@ from compiler.model_ir import (
     ModelIRError,
     Node,
     Op,
+    SourceLocation,
     Value,
     infer_node_outputs,
 )
@@ -36,6 +37,31 @@ class TestModelIR(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ModelIRError, "undefined value"):
+            graph.validate()
+
+    def test_graph_error_includes_source_location(self):
+        graph = Graph(name="broken")
+        graph.add_input("x", DType.F32, (4,))
+        source = SourceLocation(
+            op="relu",
+            shape=(4,),
+            dtype=DType.F32,
+            pass_name="test-pass",
+            location="test.py:12",
+        )
+        graph.nodes.append(
+            Node(
+                name="relu",
+                op=Op.RELU,
+                inputs=[Value("missing", DType.F32, (4,))],
+                outputs=[Value("y", DType.F32, (4,))],
+                source=source,
+            )
+        )
+
+        with self.assertRaisesRegex(ModelIRError, "op=relu"):
+            graph.validate()
+        with self.assertRaisesRegex(ModelIRError, "test.py:12"):
             graph.validate()
 
     def test_infer_conv2d_shape(self):
