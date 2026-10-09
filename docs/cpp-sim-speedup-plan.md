@@ -1,0 +1,334 @@
+# C++ Simulator Speedup Plan
+
+## 1. Goal
+
+Make full ResNet18 `1x3x224x224` numerical validation finish in normal opt-in
+test time. The current C++ simulator is faster than Python, but still far too
+slow because it interprets billions of scalar conv instructions.
+
+Target:
+
+```text
+MGPU_FULL_RESNET18=1 MGPU_CPP_SIM=1 make full-resnet18
+```
+
+must finish and match PyTorch within the existing tolerance:
+
+```text
+atol=5e-3, rtol=5e-3
+```
+
+## 2. Current baseline
+
+Measured on a small benchmark loop:
+
+```text
+Python: 48.26s
+C++:     8.58s
+speedup: 5.6x
+```
+
+Estimated current first-conv cost:
+
+```text
+~2-3 billion interpreted ISA instructions
+~0.3M instructions/second
+~8,000+ seconds for first conv alone
+```
+
+Required overall speedup:
+
+```text
+roughly 1000x or more
+```
+
+## 3. Strategy
+
+Do not try to make the generic interpreter 1000x faster first. Use three
+levels:
+
+1. Fast generic interpreter.
+2. Parallel SMs.
+3. Specialized native kernels for the hot loops emitted by `mgpu-to-isa`.
+
+Most full-model time is in:
+
+- scalar `conv_reduce_loop`,
+- scalar `mat_loop` / `linear_loop`,
+- elementwise activation and batch-norm loops,
+- pooling and global-average-pool loops.
+
+## 4. Step-by-step plan
+
+### Step 1: Instrumented benchmark baseline
+
+Add:
+
+- a benchmark for one large conv kernel,
+- a benchmark for one linear/matmul kernel,
+- a benchmark for one batchnorm/activation kernel.
+
+Files:
+
+- `scripts/benchmark_cpp_sim.py`
+- `cpp_sim/bench/`
+
+Exit:
+
+- script prints per-kernel Python/C++ time,
+- recorded in `docs/cpp-sim-speedup-plan.md`.
+
+### Step 2: Remove global-memory copy overhead
+
+Current pybind `cpp_sim.run` copies the full global buffer into and out of C++
+for every launch.
+
+Implement:
+
+- `ByteMemory` support for an externally owned byte buffer,
+- pybind wrapper writes directly into the Python `bytearray` memory,
+- no per-launch vector copy.
+
+Files:
+
+- `cpp_sim/include/cpp_sim/memory.h`
+- `cpp_sim/src/memory.cpp`
+- `cpp_sim/src/python_bindings.cpp`
+
+Expected speedup:
+
+```text
+meaningful for many small launches, less for a single huge conv
+```
+
+Exit:
+
+- large global memory launch avoids copying.
+
+### Step 3: Predecode every program
+
+Currently every instruction still carries strings and is re-dispatched.
+
+Implement a compact `DecodedInstruction`:
+
+```cpp
+enum class DecodedOp;
+uint32_t op;
+int dst_reg;
+int src_reg[3];
+int64_t imm;
+int64_t mem_offset;
+int mem_base_reg;
+```
+
+Parse once, then execute the decoded form.
+
+Files:
+
+- `cpp_sim/include/cpp_sim/isa.h`
+- `cpp_sim/src/isa.cpp`
+- `cpp_sim/src/core.cpp`
+
+Expected speedup:
+
+```text
+3-10x generic interpreter speed
+```
+
+Exit:
+
+- benchmark loop throughput improves,
+- all current operator tests still pass.
+
+### Step 4: Remove per-instruction lane allocations
+
+`active_lanes` currently creates a vector of pointers on every instruction.
+
+Replace with raw indexed loops over `warp.lanes` and the active mask.
+
+Files:
+
+- `cpp_sim/src/core.cpp`
+
+Expected speedup:
+
+```text
+2-5x generic interpreter speed
+```
+
+Exit:
+
+- no allocation in hot instruction execution path,
+- benchmark improves.
+
+### Step 5: Parallelize SM execution
+
+Within a wave, each SM is independent.
+
+Use OpenMP or `std::thread` to execute SMs in parallel.
+
+Keep:
+
+- global memory writes disjoint by block,
+- per-SM profile counters merged after the wave,
+- deterministic final memory contents.
+
+Files:
+
+- `cpp_sim/CMakeLists.txt`
+- `cpp_sim/src/core.cpp`
+
+Expected speedup:
+
+```text
+up to sm_count times for multi-SM kernels
+```
+
+Exit:
+
+- benchmark with `sm_count=8` improves,
+- repeated runs produce identical outputs.
+
+### Step 6: Inline typed memory and ALU operations
+
+Replace generic string-based dispatch with direct switch on decoded op:
+
+- direct `read_f32`/`write_f32` for FP32,
+- inline f16/bf16/f8 conversions,
+- no virtual or string-based memory type dispatch.
+
+Files:
+
+- `cpp_sim/src/core.cpp`
+- `cpp_sim/src/memory.cpp`
+
+Expected speedup:
+
+```text
+1.5-3x
+```
+
+Exit:
+
+- benchmark improves,
+- typed memory tests pass.
+
+### Step 7: Specialize `conv_reduce_loop`
+
+The single largest win.
+
+Implement a native convolution kernel for the exact loop shape emitted by
+`mgpu-to-isa`:
+
+```text
+for each output element:
+  for c, ky, kx:
+    load image
+    load weight
+    FMA
+  optional bias
+  store output
+```
+
+This does not need to be general at first. Specialize the common ResNet18
+case:
+
+- NCHW,
+- single batch,
+- f32,
+- stride/pad/dilation already encoded.
+
+Files:
+
+- `cpp_sim/src/core.cpp`
+- new `cpp_sim/src/kernels/conv.cpp`
+
+Expected speedup:
+
+```text
+100-1000x for conv-heavy models
+```
+
+Exit:
+
+- first ResNet18 conv benchmark drops from thousands of seconds to seconds,
+- conv operator tests match Python.
+
+### Step 8: Specialize matmul and linear loops
+
+Implement direct FP32 matmul/linear kernels for the scalar loops emitted by
+`mgpu-to-isa`.
+
+Files:
+
+- `cpp_sim/src/kernels/matmul.cpp`
+
+Expected speedup:
+
+```text
+large for final Linear and later LLM workloads
+```
+
+Exit:
+
+- matmul/linear operator tests match Python,
+- full ResNet18 final classifier runs quickly.
+
+### Step 9: Specialize small elementwise/norm/pool loops
+
+Implement direct C++ loops for:
+
+- ReLU,
+- batchnorm,
+- max/average pooling,
+- global average pooling,
+- elementwise add/mul.
+
+Files:
+
+- `cpp_sim/src/kernels/elementwise.cpp`
+- `cpp_sim/src/kernels/pooling.cpp`
+
+Exit:
+
+- full ResNet18 non-conv operators no longer dominate execution.
+
+### Step 10: Full-model validation gate
+
+Run:
+
+```bash
+make full-resnet18
+```
+
+Require:
+
+- full 224x224 forward finishes,
+- logits match PyTorch within `atol=5e-3`, `rtol=5e-3`,
+- cycles/profile counters captured,
+- repeated runs deterministic.
+
+## 5. Suggested commit order
+
+Commit after every step:
+
+```text
+1. benchmark baseline
+2. remove copy overhead
+3. predecoded instruction format
+4. remove lane vector allocations
+5. parallel SM execution
+6. inline typed ALU/memory
+7. native conv kernel
+8. native matmul/linear kernel
+9. native elementwise/norm/pool kernels
+10. full validation
+```
+
+## 6. Risks
+
+- Native kernel specialization can drift from `mgpu-to-isa` output.
+- Parallel SMs can introduce nondeterminism if profiles or shared state are
+  updated unsafely.
+- FP8/FP16 conversion differs between Python fixtures and C++.
+- The generic interpreter still must remain correct as fallback.
