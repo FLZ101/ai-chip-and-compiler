@@ -32,6 +32,16 @@ class TestMemoryPlan(unittest.TestCase):
         buffer = PlannedBuffer("packed", 8, "i4")
         self.assertEqual(buffer.byte_size, 4)
 
+    def test_total_bytes_reports_all_allocations(self):
+        plan = plan_memory(
+            [
+                PlannedBuffer("a", 8, "f32", live_from=0, live_until=1),
+                PlannedBuffer("b", 8, "f32", live_from=2, live_until=3),
+            ],
+            alignment=4,
+        )
+        self.assertEqual(plan.total_bytes, 64)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,7 @@ from compiler.mlir import (
     MLIRCanonicalizer,
     TorchMLIRImporter,
     run_model_pipeline,
+    run_model_pipeline_with_memory_plan,
 )
 
 RESNET18_WEIGHTS = (
@@ -75,6 +76,39 @@ class TestPretrainedCNNImport(unittest.TestCase):
         self.assertTrue(all(program.code for program in bundle.programs))
         self.assertTrue(all(program.grid for program in bundle.programs))
         self.assertTrue(all(program.block for program in bundle.programs))
+
+    def test_full_resnet18_memory_plan_is_deterministic_and_fits(self):
+        """Phase C of ``docs/resnet18-run-plan.md``.
+
+        The full module is bufferized, all static memref buffers are planned
+        with lifetime-aware reuse, and the resulting ``mgpu.memory_layout`` is
+        injected before lowering.  The plan must fit the configured 64 MiB
+        global-memory budget and be identical across repeated runs.
+        """
+        model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
+        example = torch.zeros(1, 3, 224, 224)
+        imported = TorchMLIRImporter().import_module(
+            model,
+            example,
+            func_name="resnet18",
+        )
+        canonicalized = MLIRCanonicalizer().canonicalize(imported)
+
+        first = run_model_pipeline_with_memory_plan(canonicalized.text)
+        second = run_model_pipeline_with_memory_plan(canonicalized.text)
+
+        self.assertIsNotNone(first.memory_plan)
+        self.assertIsNotNone(second.memory_plan)
+        self.assertLessEqual(first.memory_plan.peak_bytes, 64 * 1024 * 1024)
+        self.assertEqual(
+            first.memory_plan.peak_bytes,
+            second.memory_plan.peak_bytes,
+        )
+        self.assertEqual(
+            first.memory_plan.total_bytes,
+            second.memory_plan.total_bytes,
+        )
+        self.assertEqual(len(first.programs), len(second.programs))
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from .mgpu_runner import (
     lower_with_mgpu_opt,
     run_mgpu_pipeline,
     run_model_pipeline,
+    run_model_pipeline_with_memory_plan,
 )
 from .mgpu_to_isa import MGpuToIsaError, lower_mgpu_to_isa
 from .passes import DEFAULT_PASS_PIPELINE, Pass, PassPipeline
@@ -54,4 +55,5 @@ __all__ = [
     "lower_with_mgpu_opt",
     "run_mgpu_pipeline",
     "run_model_pipeline",
+    "run_model_pipeline_with_memory_plan",
 ]

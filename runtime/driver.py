@@ -82,6 +82,46 @@ class Driver:
     def copy_from_device(self, buffer: Buffer | str) -> np.ndarray:
         return self._get_buffer(buffer).read()
 
+    def allocate_from_plan(
+        self,
+        plan: object,
+        shape_by_name: dict[str, tuple[int, ...]],
+        *,
+        dtype: str = "f32",
+    ) -> dict[str, Buffer]:
+        """Create buffers at the byte offsets chosen by a :class:`MemoryPlan`.
+
+        Phase C keeps the allocator's decisions in ``MemoryPlan`` instead of
+        the driver's sequential ``_cursor``.  This method materializes those
+        decisions as device buffers so a later full-model runner can copy
+        weights and activations into the exact addresses emitted by
+        ``mgpu-to-isa``.
+        """
+        buffers: dict[str, Buffer] = {}
+        for name, shape in shape_by_name.items():
+            if name in self._buffers:
+                raise DriverError(f"buffer {name!r} already exists")
+            offset = plan.offset(name)  # type: ignore[attr-defined]
+            size = plan.size(name)  # type: ignore[attr-defined]
+            buffer = Buffer(
+                self.device,
+                name=name,
+                base_addr=offset,
+                shape=tuple(shape),
+                dtype=dtype,
+            )
+            if offset + buffer.nbytes > len(self.device.global_memory.data):
+                raise DriverError("planned allocation exceeds simulated global memory")
+            if buffer.nbytes != size:
+                raise DriverError(
+                    f"plan size mismatch for {name!r}: " f"{size} != {buffer.nbytes}"
+                )
+            self._buffers[name] = buffer
+            self._cursor = max(self._cursor, offset + buffer.nbytes)
+            buffer.write(np.zeros(buffer.shape, dtype=np.float32))
+            buffers[name] = buffer
+        return buffers
+
     def launch(
         self,
         program: Program | str,

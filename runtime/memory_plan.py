@@ -53,6 +53,11 @@ class MemoryPlan:
     allocations: dict[str, PlannedAllocation] = field(default_factory=dict)
     peak_bytes: int = 0
 
+    @property
+    def total_bytes(self) -> int:
+        """Total bytes reserved across all planned buffers."""
+        return sum(allocation.size for allocation in self.allocations.values())
+
     def offset(self, name: str) -> int:
         return self.allocations[name].offset
 

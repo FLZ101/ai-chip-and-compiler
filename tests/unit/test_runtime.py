@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from runtime import Driver
+from runtime.memory_plan import PlannedBuffer, plan_memory
 
 
 class TestRuntimeDriver(unittest.TestCase):
@@ -51,6 +52,26 @@ EXIT
         driver = Driver(global_size=1 << 20, sm_count=4)
         with self.assertRaises(Exception):
             driver.copy_from_device("missing")
+
+    def test_allocate_from_memory_plan_uses_planned_offsets(self):
+        driver = Driver(global_size=1 << 16, sm_count=4)
+        plan = plan_memory(
+            [
+                PlannedBuffer("a", 8, "f32", live_from=0, live_until=1),
+                PlannedBuffer("b", 8, "f32", live_from=2, live_until=3),
+            ],
+            alignment=4,
+        )
+        buffers = driver.allocate_from_plan(
+            plan,
+            {"a": (8,), "b": (8,)},
+        )
+
+        self.assertEqual(buffers["a"].base_addr, plan.offset("a"))
+        self.assertEqual(buffers["b"].base_addr, plan.offset("b"))
+        np.testing.assert_array_equal(
+            buffers["a"].read(), np.zeros((8,), dtype=np.float32)
+        )
 
 
 if __name__ == "__main__":
