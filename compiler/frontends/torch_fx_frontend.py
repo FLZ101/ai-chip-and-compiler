@@ -146,6 +146,15 @@ class TorchFXFrontend:
                 self._resolve_arg(node.args[0], values),
                 self._resolve_arg(node.args[1], values),
             )
+        if getattr(target, "__name__", "") == "flatten":
+            value = self._resolve_arg(node.args[0], values)
+            start_dim = int(node.args[1]) if len(node.args) > 1 else 1
+            end_dim = int(node.args[2]) if len(node.args) > 2 else -1
+            if start_dim != 1 or end_dim != -1:
+                raise TorchFXFrontendError(
+                    "only torch.Tensor.flatten(start_dim=1) is supported"
+                )
+            return frontend.reshape(value, (value.shape[0], -1))
         if target is box_decode:
             boxes = self._resolve_arg(node.args[0], values)
             deltas = self._resolve_arg(node.args[1], values)
@@ -254,12 +263,30 @@ class TorchFXFrontend:
             )
         if isinstance(module, nn.MaxPool2d):
             x = self._resolve_arg(node.args[0], values)
+            padding = module.padding
+            if isinstance(padding, (tuple, list)):
+                pad_y, pad_x = int(padding[0]), int(padding[1])
+            else:
+                pad_y = pad_x = int(padding)
+            if pad_y or pad_x:
+                x = frontend.pad(
+                    x,
+                    ((0, 0), (0, 0), (pad_y, pad_y), (pad_x, pad_x)),
+                    value=-1.0e30,
+                )
             return frontend.max_pool2d(
                 x,
                 kernel=module.kernel_size,
                 strides=module.stride,
-                padding=module.padding,
+                padding=0,
             )
+        if isinstance(module, nn.AdaptiveAvgPool2d):
+            x = self._resolve_arg(node.args[0], values)
+            if tuple(module.output_size) != (1, 1):
+                raise TorchFXFrontendError(
+                    "only AdaptiveAvgPool2d(output_size=(1, 1)) is supported"
+                )
+            return frontend.global_avg_pool(x)
         raise TorchFXFrontendError(f"unsupported FX module: {type(module).__name__}")
 
     def _convert_call_method(

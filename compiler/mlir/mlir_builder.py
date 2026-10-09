@@ -429,11 +429,17 @@ class MLIRBuilder:
             output = node.outputs[0]
             pads = tuple(node.attrs.get("pads", ((0, 0),)))
             before, after = int(pads[0][0]), int(pads[0][1])
+            before_y = int(pads[2][0]) if len(pads) > 2 else 0
+            after_y = int(pads[2][1]) if len(pads) > 2 else 0
+            before_x = int(pads[3][0]) if len(pads) > 3 else 0
+            after_x = int(pads[3][1]) if len(pads) > 3 else 0
             pad_value = float(node.attrs.get("value", 0.0))
             return [
                 f"{indent}mgpu.pad {self._value_names[value.name]}, "
                 f"{result_name} before = {before}, after = {after}, "
-                f"value = {pad_value!r} : {self._memref_type(value)}, "
+                f"value = {pad_value:.1e}, beforeY = {before_y}, "
+                f"afterY = {after_y}, beforeX = {before_x}, "
+                f"afterX = {after_x} : {self._memref_type(value)}, "
                 f"{self._memref_type(output)}"
             ]
         if node.op == Op.RESIZE:

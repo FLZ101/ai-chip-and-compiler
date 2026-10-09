@@ -279,11 +279,17 @@ def MGPU_PadOp : MGPU_Op<"pad", [MemoryEffects<[MemRead, MemWrite]>]> {
                        AnyMemRef:$output,
                        I64Attr:$before,
                        I64Attr:$after,
+                       I64Attr:$beforeY,
+                       I64Attr:$afterY,
+                       I64Attr:$beforeX,
+                       I64Attr:$afterX,
                        F32Attr:$value);
   let results = (outs);
   let assemblyFormat = [{
     $input `,` $output
     `before` `=` $before `,` `after` `=` $after `,` `value` `=` $value
+    `,` `beforeY` `=` $beforeY `,` `afterY` `=` $afterY
+    `,` `beforeX` `=` $beforeX `,` `afterX` `=` $afterX
     attr-dict
     `:` type($input) `,` type($output)
   }];

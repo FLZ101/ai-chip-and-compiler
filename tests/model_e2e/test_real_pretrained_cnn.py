@@ -110,6 +110,29 @@ class TestPretrainedCNNImport(unittest.TestCase):
         )
         self.assertEqual(len(first.programs), len(second.programs))
 
+    def test_full_resnet18_final_linear_lowers_to_isa(self):
+        """Phase D structural gate for the final classifier.
+
+        The full model pipeline must emit a bounded ``linear_loop`` ISA program
+        for ResNet18's ``512 -> 1000`` classifier.
+        """
+        model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
+        example = torch.zeros(1, 3, 224, 224)
+        imported = TorchMLIRImporter().import_module(
+            model,
+            example,
+            func_name="resnet18",
+        )
+        canonicalized = MLIRCanonicalizer().canonicalize(imported)
+        bundle = run_model_pipeline_with_memory_plan(canonicalized.text)
+
+        self.assertTrue(
+            any(
+                "mat_loop" in program.code and program.grid == (32, 1, 1)
+                for program in bundle.programs
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

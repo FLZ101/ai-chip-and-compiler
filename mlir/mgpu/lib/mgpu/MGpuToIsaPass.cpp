@@ -1508,6 +1508,12 @@ struct MGpuToIsaPass
         dilX = values[1];
       }
     }
+    int64_t padTotalY =
+        (oh - 1) * strideY + (kernelY - 1) * dilY + 1 - h;
+    int64_t padTotalX =
+        (ow - 1) * strideX + (kernelX - 1) * dilX + 1 - w;
+    int64_t padY = padTotalY > 0 ? (padTotalY + 1) / 2 : 0;
+    int64_t padX = padTotalX > 0 ? (padTotalX + 1) / 2 : 0;
     int64_t total = c * oh * ow;
     int64_t inputBase = bufferMap.base(dstOp.getDpsInputs()[0]);
     int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
@@ -1544,6 +1550,25 @@ struct MGpuToIsaPass
        << "MOV R32, " << dilX << "\n"
        << "MUL R32, R26, R32\n"
        << "ADD R31, R31, R32\n"
+       << "SUB R30, R30, " << padY << "\n"
+       << "SUB R31, R31, " << padX << "\n"
+       << "CMP.GE R33, R30, 0\n"
+       << "MOV R34, " << h << "\n"
+       << "CMP.LT R35, R30, R34\n"
+       << "MUL R36, R33, R35\n"
+       << "CMP.GE R37, R31, 0\n"
+       << "MOV R38, " << w << "\n"
+       << "CMP.LT R39, R31, R38\n"
+       << "MUL R40, R37, R39\n"
+       << "MUL R41, R36, R40\n"
+       << "MOV R42, 0\n"
+       << "MAX R30, R30, R42\n"
+       << "MOV R42, " << (h - 1) << "\n"
+       << "MIN R30, R30, R42\n"
+       << "MOV R42, 0\n"
+       << "MAX R31, R31, R42\n"
+       << "MOV R42, " << (w - 1) << "\n"
+       << "MIN R31, R31, R42\n"
        << "MOV R6, " << h << "\n"
        << "MUL R6, R1, R6\n"
        << "ADD R6, R6, R30\n"
@@ -1552,6 +1577,8 @@ struct MGpuToIsaPass
        << "MUL R6, R6, 4\n"
        << "ADD R6, R6, " << inputBase << "\n"
        << "LDG R8, [R6]\n"
+       << "MOV R42, " << identity << "\n"
+       << "SEL R8, R41, R8, R42\n"
        << arith << " R20, R20, R8\n"
        << "ADD R21, R21, 1\n"
        << "BRA pool_loop\n"
@@ -2362,6 +2389,78 @@ struct MGpuToIsaPass
     auto op = ops.front();
     auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (inputType && outType && inputType.getRank() == 4 &&
+        outType.getRank() == 4) {
+      int64_t c = inputType.getShape()[1];
+      int64_t h = inputType.getShape()[2];
+      int64_t w = inputType.getShape()[3];
+      int64_t cOut = outType.getShape()[1];
+      int64_t oh = outType.getShape()[2];
+      int64_t ow = outType.getShape()[3];
+      int64_t beforeY = op.getBeforeY();
+      int64_t afterY = op.getAfterY();
+      int64_t beforeX = op.getBeforeX();
+      int64_t afterX = op.getAfterX();
+      if (c != cOut || oh != h + beforeY + afterY ||
+          ow != w + beforeX + afterX)
+        return std::nullopt;
+
+      int64_t total = c * oh * ow;
+      int64_t inputBase = bufferMap.base(op.getInput());
+      int64_t outBase = bufferMap.base(op.getOutput());
+      double value = op.getValue().convertToDouble();
+
+      std::string code;
+      llvm::raw_string_ostream os(code);
+      emitCnnPrologue(os, total);
+      os << "IDIV R1, R0, " << (oh * ow) << "\n"
+         << "MUL R4, R1, " << (oh * ow) << "\n"
+         << "SUB R5, R0, R4\n"
+         << "IDIV R2, R5, " << ow << "\n"
+         << "MUL R6, R2, " << ow << "\n"
+         << "SUB R3, R5, R6\n"
+         << "SUB R30, R2, " << beforeY << "\n"
+         << "SUB R31, R3, " << beforeX << "\n"
+         << "CMP.GE R4, R30, 0\n"
+         << "MOV R6, " << h << "\n"
+         << "CMP.LT R7, R30, R6\n"
+         << "MUL R8, R4, R7\n"
+         << "CMP.GE R9, R31, 0\n"
+         << "MOV R10, " << w << "\n"
+         << "CMP.LT R11, R31, R10\n"
+         << "MUL R12, R9, R11\n"
+         << "MUL R13, R8, R12\n"
+         << "MOV R14, 0\n"
+         << "MAX R15, R30, R14\n"
+         << "MOV R14, " << (h - 1) << "\n"
+         << "MIN R15, R15, R14\n"
+         << "MOV R16, 0\n"
+         << "MAX R17, R31, R16\n"
+         << "MOV R16, " << (w - 1) << "\n"
+         << "MIN R17, R17, R16\n"
+         << "MOV R18, " << h << "\n"
+         << "MUL R18, R1, R18\n"
+         << "ADD R18, R18, R15\n"
+         << "MUL R18, R18, " << w << "\n"
+         << "ADD R18, R18, R17\n"
+         << "MUL R18, R18, 4\n"
+         << "ADD R18, R18, " << inputBase << "\n"
+         << "LDG R20, [R18]\n"
+         << "MOV R21, " << value << "\n"
+         << "SEL R22, R13, R20, R21\n"
+         << "MUL R18, R0, 4\n"
+         << "ADD R18, R18, " << outBase << "\n"
+         << "STG [R18], R22\n";
+      emitCnnFinish(os);
+      os.flush();
+
+      IsaText isa;
+      isa.code = code;
+      isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+      isa.block = "32x1x1";
+      return isa;
+    }
+
     if (!inputType || !outType || inputType.getRank() != 1 ||
         outType.getRank() != 1)
       return std::nullopt;
