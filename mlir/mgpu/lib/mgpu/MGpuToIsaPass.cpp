@@ -2584,16 +2584,22 @@ struct MGpuToIsaPass
     auto outputType = dyn_cast<MemRefType>(attention.getOutput().getType());
     if (!qType || !kType || !vType || !outputType)
       return std::nullopt;
-    if (qType.getRank() != 2 || kType.getRank() != 2 ||
-        vType.getRank() != 2 || outputType.getRank() != 2)
+    if ((qType.getRank() != 2 && qType.getRank() != 4) ||
+        kType.getRank() != qType.getRank() ||
+        vType.getRank() != qType.getRank() ||
+        outputType.getRank() != qType.getRank())
       return std::nullopt;
 
-    int64_t seq = qType.getShape()[0];
-    int64_t dim = qType.getShape()[1];
-    if (seq > 16 || dim > 16 || kType.getShape()[0] != seq ||
-        kType.getShape()[1] != dim || vType.getShape()[0] != seq ||
-        vType.getShape()[1] != dim || outputType.getShape()[0] != seq ||
-        outputType.getShape()[1] != dim)
+    bool rank4 = qType.getRank() == 4;
+    int64_t seq = rank4 ? qType.getShape()[2] : qType.getShape()[0];
+    int64_t dim = rank4 ? qType.getShape()[3] : qType.getShape()[1];
+    if (seq > 16 || dim > 16 ||
+        (rank4 ? kType.getShape()[2] : kType.getShape()[0]) != seq ||
+        (rank4 ? kType.getShape()[3] : kType.getShape()[1]) != dim ||
+        (rank4 ? vType.getShape()[2] : vType.getShape()[0]) != seq ||
+        (rank4 ? vType.getShape()[3] : vType.getShape()[1]) != dim ||
+        (rank4 ? outputType.getShape()[2] : outputType.getShape()[0]) != seq ||
+        (rank4 ? outputType.getShape()[3] : outputType.getShape()[1]) != dim)
       return std::nullopt;
 
     double scale = attention.getScale().convertToDouble();

@@ -15,6 +15,7 @@ later passes rather than by this initial builder.
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass, field
 
 from ..model_ir import DType, Graph, Node, Op, Value
@@ -709,16 +710,11 @@ class MLIRBuilder:
         output = node.outputs[0]
         if value.rank != 2 or output.rank != 2:
             raise MLIRBuilderError("linalg softmax lowering currently supports rank-2")
-        return self._emit_softmax_decomposition(
-            self._value_names[value.name],
-            self._memref_type(value),
-            result_name,
-            self._memref_type(output),
-            value.shape,
-            output.dtype,
-            result_name.lstrip("%"),
-            indent,
-        )
+        return [
+            f"{indent}mgpu.softmax {self._value_names[value.name]}, "
+            f"{result_name} : {self._memref_type(value)}, "
+            f"{self._memref_type(output)}"
+        ]
 
     def _emit_softmax_decomposition(
         self,
@@ -801,6 +797,13 @@ class MLIRBuilder:
             raise MLIRBuilderError(
                 "linalg layer_norm lowering currently supports rank-2"
             )
+        return [
+            f"{indent}mgpu.layer_norm {self._value_names[x.name]}, "
+            f"{self._value_names[weight.name]}, {self._value_names[bias.name]}, "
+            f"{result_name} : {self._memref_type(x)}, "
+            f"{self._memref_type(weight)}, {self._memref_type(bias)}, "
+            f"{self._memref_type(output)}"
+        ]
         epsilon = float(node.attrs.get("epsilon", 1e-5))
         suffix = result_name.lstrip("%")
         scalar = self._scalar_type(output.dtype)
@@ -927,6 +930,12 @@ class MLIRBuilder:
         output = node.outputs[0]
         if x.rank != 2 or output.rank != 2:
             raise MLIRBuilderError("linalg rms_norm lowering currently supports rank-2")
+        return [
+            f"{indent}mgpu.rms_norm {self._value_names[x.name]}, "
+            f"{self._value_names[weight.name]}, {result_name} : "
+            f"{self._memref_type(x)}, {self._memref_type(weight)}, "
+            f"{self._memref_type(output)}"
+        ]
         epsilon = float(node.attrs.get("epsilon", 1e-5))
         suffix = result_name.lstrip("%")
         scalar = self._scalar_type(output.dtype)
@@ -1025,6 +1034,21 @@ class MLIRBuilder:
                 "linalg attention lowering currently supports rank-4 Q/K/V "
                 "with batch=1 and heads=1"
             )
+        mask_value = node.inputs[3] if node.op == Op.MASKED_ATTENTION else q
+        scale = float(node.attrs.get("scale", 1.0 / math.sqrt(q.shape[3])))
+        masked_attr = "masked" if node.op == Op.MASKED_ATTENTION else ""
+        attr_text = f"{{scale = {scale!r} : f32"
+        if masked_attr:
+            attr_text += f", {masked_attr}"
+        attr_text += "}"
+        return [
+            f"{indent}mgpu.attention {self._value_names[q.name]}, "
+            f"{self._value_names[k.name]}, {self._value_names[v.name]}, "
+            f"{self._value_names[mask_value.name]}, {result_name} "
+            f"{attr_text} : {self._memref_type(q)}, {self._memref_type(k)}, "
+            f"{self._memref_type(v)}, {self._memref_type(mask_value)}, "
+            f"{self._memref_type(output)}"
+        ]
         suffix = result_name.lstrip("%")
         seq = q.shape[2]
         dim = q.shape[3]
