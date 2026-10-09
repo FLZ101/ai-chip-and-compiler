@@ -420,10 +420,12 @@ struct MGpuToIsaPass
       return std::nullopt;
 
     auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
-    if (!outputType || outputType.getRank() != 1)
+    if (!outputType)
       return std::nullopt;
 
-    int64_t n = outputType.getShape()[0];
+    int64_t n = 1;
+    for (int64_t dim : outputType.getShape())
+      n *= dim;
     int64_t blockSize = 32;
     int64_t gridX = (n + blockSize - 1) / blockSize;
     int64_t leftBase = bufferMap.base(dstOp.getDpsInputs()[0]);
@@ -753,12 +755,21 @@ struct MGpuToIsaPass
 
       auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
       auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
-      if (!inputType || !outputType || inputType.getRank() != 1 ||
-          outputType.getRank() != 1 || inputType.getShape()[0] != outputType.getShape()[0])
+      if (!inputType || !outputType)
         continue;
 
-      int64_t n = outputType.getShape()[0];
-      int64_t outputDelta = n * 4;
+      int64_t inputElements = 1;
+      int64_t outputElements = 1;
+      for (int64_t dim : inputType.getShape())
+        inputElements *= dim;
+      for (int64_t dim : outputType.getShape())
+        outputElements *= dim;
+      if (inputElements != outputElements)
+        continue;
+
+      int64_t n = outputElements;
+      int64_t inputBase = bufferMap.base(dstOp.getDpsInputs()[0]);
+      int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
       int64_t blockSize = 32;
       int64_t gridX = (n + blockSize - 1) / blockSize;
 
@@ -771,11 +782,14 @@ struct MGpuToIsaPass
          << "CMP.LT R2, R0, R1\n"
          << "BRA body, R2, end\n"
          << "BRA end\n"
-         << "body:\n"
-         << "MUL R3, R0, 4\n"
-         << "LDG R5, [R3]\n";
+       << "body:\n"
+       << "MUL R3, R0, 4\n"
+       << "ADD R3, R3, " << inputBase << "\n"
+       << "LDG R5, [R3]\n";
       emitActivationBody(os, *kind);
-      os << "STG [R3 + " << outputDelta << "], R6\n"
+      os << "MUL R4, R0, 4\n"
+         << "ADD R4, R4, " << outputBase << "\n"
+         << "STG [R4], R6\n"
          << "BRA end\n"
          << "end:\n"
          << "EXIT\n";
@@ -1733,6 +1747,55 @@ struct MGpuToIsaPass
 
     auto inputType = dyn_cast<MemRefType>(ops.front().getInput().getType());
     auto outType = dyn_cast<MemRefType>(ops.front().getOutput().getType());
+    if (inputType && outType && inputType.getRank() == 4 &&
+        outType.getRank() == 4) {
+      int64_t n = inputType.getShape()[0];
+      int64_t c = inputType.getShape()[1];
+      int64_t h = inputType.getShape()[2];
+      int64_t w = inputType.getShape()[3];
+      int64_t cOut = outType.getShape()[1];
+      int64_t oh = outType.getShape()[2];
+      int64_t ow = outType.getShape()[3];
+      if (n != 1 || c != cOut)
+        return std::nullopt;
+      int64_t total = c * oh * ow;
+      int64_t inputBase = bufferMap.base(ops.front().getInput());
+      int64_t outBase = bufferMap.base(ops.front().getOutput());
+
+      std::string code;
+      llvm::raw_string_ostream os(code);
+      emitCnnPrologue(os, total);
+      os << "IDIV R1, R0, " << (oh * ow) << "\n"
+         << "MUL R2, R1, " << (oh * ow) << "\n"
+         << "SUB R3, R0, R2\n"
+         << "IDIV R2, R3, " << ow << "\n"
+         << "MUL R4, R2, " << ow << "\n"
+         << "SUB R5, R3, R4\n"
+         << "MUL R6, R2, " << h << "\n"
+         << "IDIV R6, R6, " << oh << "\n"
+         << "MUL R7, R5, " << w << "\n"
+         << "IDIV R7, R7, " << ow << "\n"
+         << "MOV R8, R1\n"
+         << "MUL R8, R8, " << h << "\n"
+         << "ADD R8, R8, R6\n"
+         << "MUL R8, R8, " << w << "\n"
+         << "ADD R8, R8, R7\n"
+         << "MUL R8, R8, 4\n"
+         << "ADD R8, R8, " << inputBase << "\n"
+         << "LDG R10, [R8]\n"
+         << "MUL R11, R0, 4\n"
+         << "ADD R11, R11, " << outBase << "\n"
+         << "STG [R11], R10\n";
+      emitCnnFinish(os);
+      os.flush();
+
+      IsaText isa;
+      isa.code = code;
+      isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+      isa.block = "32x1x1";
+      return isa;
+    }
+
     if (!inputType || !outType || inputType.getRank() != 1 ||
         outType.getRank() != 1)
       return std::nullopt;

@@ -20,7 +20,6 @@ from typing import Callable
 import numpy as np
 
 from compiler.mlir import MLIRBuilder
-from compiler.codegen.dispatcher import lower_kernel_python
 from compiler.model_ir import Graph, Op
 from hw.device import Device, create_device, launch
 from hw.isa import parse_asm
@@ -175,9 +174,7 @@ def run_operator_e2e(
             )
             subgraph.validate()
             sub_mlir_text = MLIRBuilder().build(subgraph)
-            node_isa, (grid_dim, block_dim) = lower_kernel_python(
-                subgraph, sub_mlir_text, layout
-            )
+            node_isa, (grid_dim, block_dim) = lowering(subgraph, sub_mlir_text, layout)
             isa_parts.append(node_isa)
             program = parse_asm(node_isa)
             profile_snapshot = launch(
