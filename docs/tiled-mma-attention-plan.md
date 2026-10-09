@@ -28,17 +28,18 @@ General requirements:
 The generated ISA must remain bounded and must match PyTorch on GPT-2-like
 shapes.
 
-## 2. Current limitation
+## 2. Current status
 
-`emitAttentionIsa` returns unsupported for:
+Phases 1 through 3 are implemented and tested:
 
-```text
-seq > 16
-head_dim > 16
-```
+- Phase 1: reusable fragment staging helpers.
+- Phase 2: tiled Q @ K^T score loops over query, key, and head-dimension
+  tiles.
+- Phase 3: two-pass tiled softmax with explicit causal masking.
 
-It assumes a single 16x16 MMA and unrolled fragments. GPT-2 head dim is 64,
-so this path cannot lower the real model.
+The original small-shape path still handles `seq <= 16` and `head_dim <= 16`.
+Large rank-4 attention falls back to `emitScalarAttentionIsa` until Phase 4
+adds tiled value accumulation.
 
 ## 3. Design
 
@@ -114,7 +115,7 @@ tiles that extend beyond `seq` or `head_dim` are masked or zeroed.
 
 ## 4. Implementation phases
 
-### Phase 1: Fragment staging helpers
+### Phase 1: Fragment staging helpers — complete
 
 Add helpers:
 
@@ -132,7 +133,7 @@ Exit:
 - existing small attention tests still pass,
 - helper functions are reusable.
 
-### Phase 2: General tiled score computation
+### Phase 2: General tiled score computation — complete
 
 Generate ISA loops over query/key tiles using computed tile counts.
 
@@ -146,7 +147,7 @@ Exit:
 - padding tiles are handled correctly,
 - `MMA` is called with fragment-staged Q/K tiles.
 
-### Phase 3: Causal masking and softmax
+### Phase 3: Causal masking and softmax — complete
 
 Implement:
 
@@ -159,10 +160,18 @@ Implement:
 Files:
 
 - `mlir/mgpu/lib/mgpu/MGpuToIsaPass.cpp`
+- `tests/mlir/mgpu_to_isa_attention_tiled_softmax.mlir`
+- `tests/operator_e2e/test_tiled_attention_kernels_e2e.py`
 
 Exit:
 
-- causal attention matches a NumPy softmax reference on cropped shapes.
+- masked softmax matches a NumPy reference for `seq=8`, `head_dim=64`,
+- masked softmax matches for `seq=32`, `head_dim=32`,
+- generated ISA contains `softmax_row_loop`, `softmax_max_loop`,
+  `softmax_sum_loop`, `softmax_store_loop`, `EXP2`, and `BAR.SYNC`.
+
+The implementation uses a two-pass softmax over all key positions for each
+query row, then writes normalized weights back into the score tiles.
 
 ### Phase 4: General tiled value accumulation
 
@@ -218,9 +227,9 @@ Exit:
 ## 5. Suggested commit order
 
 ```text
-1. fragment staging helpers
-2. tiled score computation
-3. causal masking and softmax
+1. fragment staging helpers — complete
+2. tiled score computation — complete
+3. causal masking and softmax — complete
 4. tiled value accumulation
 5. loop and grid mapping
 6. differential and lit tests
