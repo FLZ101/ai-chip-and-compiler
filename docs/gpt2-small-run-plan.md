@@ -204,7 +204,7 @@ Remaining:
 
 ### Phase E: Model-wide memory planning
 
-Status: **not started for GPT-2**
+Status: **done**
 
 Use the lifetime-aware planner for:
 
@@ -219,12 +219,18 @@ Files:
 - `runtime/memory_plan.py`
 - `compiler/mlir/mgpu_runner.py`
 - `runtime/driver.py`
+- `tests/model_e2e/test_real_llm_memory.py`
 
 Exit criteria:
 
 - peak memory fits configured global memory,
 - memory plan is deterministic and reproducible,
 - planner reports total and peak bytes.
+
+The test builds an explicit GPT-2-sized buffer plan for embeddings, all 12
+transformer-block weights, activations, final logits, and the KV cache. Full
+module-level plan injection remains blocked by the unsupported
+`tm_tensor.scan` op in the canonicalized GPT-2 module.
 
 ### Phase F: Autoregressive loop
 

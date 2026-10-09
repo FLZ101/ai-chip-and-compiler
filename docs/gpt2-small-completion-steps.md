@@ -105,7 +105,7 @@ Implemented:
 - opt-in software execution for `8x768 -> 8x50257`,
 - bounded `mgpu.linear` lowering checks for all three shapes.
 
-## Step 6: Build GPT-2 memory plan
+## Step 6: Build GPT-2 memory plan — complete
 
 Use the lifetime-aware planner for embeddings, all 12 block weights,
 activations, logits, and KV cache.
@@ -121,6 +121,10 @@ Exit:
 - peak memory fits configured global memory,
 - plan is deterministic,
 - planner reports total and peak bytes.
+
+Implemented with explicit GPT-2-sized `PlannedBuffer` entries in
+`tests/model_e2e/test_real_llm_memory.py`. Full canonicalized-module injection
+still requires support for the `tm_tensor.scan` op.
 
 ## Step 7: Implement greedy autoregressive loop
 
@@ -160,7 +164,7 @@ Exit:
 3. software attention — complete
 4. mgpu attention — complete
 5. large linear tests — complete
-6. GPT-2 memory plan
+6. GPT-2 memory plan — complete
 7. greedy decode loop
 8. numerical gates
 ```
