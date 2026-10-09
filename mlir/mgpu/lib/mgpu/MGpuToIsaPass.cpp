@@ -3142,6 +3142,40 @@ struct MGpuToIsaPass
       os << "MOV R" << reg << ", 0\n";
   }
 
+  static void emitZeroTile(llvm::raw_ostream &os, int baseReg) {
+    for (int offset = 0; offset < 8; ++offset)
+      os << "MOV R" << (baseReg + offset) << ", 0\n";
+  }
+
+  static void emitLoadTileFromShared(llvm::raw_ostream &os, int destBase,
+                                     int rowGroup, int colGroup,
+                                     int64_t sharedOffset) {
+    os << "MOV R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MOV R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "MUL R28, R26, 16\n"
+       << "ADD R28, R28, R27\n"
+       << "MUL R28, R28, 4\n"
+       << "ADD R28, R28, " << sharedOffset << "\n"
+       << "LDS R42, [R28]\n"
+       << "MOV R" << destBase << ", R42\n";
+  }
+
+  static void emitStoreTileToShared(llvm::raw_ostream &os, int sourceBase,
+                                    int rowGroup, int colGroup,
+                                    int64_t sharedOffset) {
+    os << "MOV R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MOV R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "MUL R28, R26, 16\n"
+       << "ADD R28, R28, R27\n"
+       << "MUL R28, R28, 4\n"
+       << "ADD R28, R28, " << sharedOffset << "\n"
+       << "STS [R28], R" << sourceBase << "\n";
+  }
+
   static void emitStoreSharedFragment(llvm::raw_ostream &os, int source,
                                       int rowGroup, int colGroup,
                                       int64_t offset) {
