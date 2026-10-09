@@ -106,20 +106,22 @@ Operand parse_operand(std::string token) {
     return operand;
   }
 
-  try {
-    Operand operand;
-    operand.kind = OperandKind::Imm;
-    operand.imm = static_cast<double>(std::stoll(token, nullptr, 0));
-    return operand;
-  } catch (...) {
-  }
-
-  try {
-    Operand operand;
-    operand.kind = OperandKind::Imm;
-    operand.imm = std::stod(token);
-    return operand;
-  } catch (...) {
+  if (token.find_first_of(".eE") != std::string::npos) {
+    try {
+      Operand operand;
+      operand.kind = OperandKind::Imm;
+      operand.imm = std::stod(token);
+      return operand;
+    } catch (...) {
+    }
+  } else {
+    try {
+      Operand operand;
+      operand.kind = OperandKind::Imm;
+      operand.imm = static_cast<double>(std::stoll(token, nullptr, 0));
+      return operand;
+    } catch (...) {
+    }
   }
 
   if (looks_like_label(token)) {

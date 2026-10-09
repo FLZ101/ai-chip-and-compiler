@@ -206,8 +206,27 @@ std::vector<LaneState *> active_lanes(WarpState &warp) {
   return lanes;
 }
 
+bool apply_reconvergence(WarpState &warp) {
+  if (warp.reconvergence_stack.empty())
+    return false;
+  ReconvergenceState &state = warp.reconvergence_stack.back();
+  if (warp.pc != state.reconvergence_pc)
+    return false;
+  if (state.phase == "taken") {
+    warp.active_mask = state.pending_mask;
+    warp.pc = state.pending_pc;
+    state.phase = "fallthrough";
+    return true;
+  }
+  warp.active_mask = state.original_mask;
+  warp.reconvergence_stack.pop_back();
+  return true;
+}
+
 void execute_instruction(Device &device, SM &sm, WarpState &warp,
                          const Program &program) {
+  while (apply_reconvergence(warp)) {
+  }
   if (warp.pc < 0 || warp.pc >= static_cast<int>(program.instructions.size())) {
     warp.exited = true;
     return;
@@ -246,14 +265,32 @@ void execute_instruction(Device &device, SM &sm, WarpState &warp,
       warp.pc = target;
       return;
     }
-    auto lanes = active_lanes(warp);
-    if (lanes.empty()) {
+    uint32_t taken_mask = 0;
+    for (LaneState *lane : active_lanes(warp)) {
+      if (read_operand(device, sm, warp, *lane, inst.operands[1]) != 0)
+        taken_mask |= 1u << lane->lane_id;
+    }
+    uint32_t fallthrough_mask = warp.active_mask & ~taken_mask;
+    if (taken_mask == 0) {
       warp.pc += 1;
       return;
     }
-    double condition =
-        read_operand(device, sm, warp, *lanes.front(), inst.operands[1]);
-    warp.pc = condition != 0 ? target : warp.pc + 1;
+    if (fallthrough_mask == 0) {
+      warp.active_mask = taken_mask;
+      warp.pc = target;
+      return;
+    }
+    if (inst.operands.size() != 3 ||
+        inst.operands[2].kind != OperandKind::Label)
+      throw std::runtime_error("divergent BRA requires a reconvergence label");
+    ReconvergenceState state;
+    state.pending_pc = warp.pc + 1;
+    state.pending_mask = fallthrough_mask;
+    state.reconvergence_pc = program.labels.at(inst.operands[2].text);
+    state.original_mask = warp.active_mask;
+    warp.reconvergence_stack.push_back(state);
+    warp.active_mask = taken_mask;
+    warp.pc = target;
     return;
   }
 
@@ -333,7 +370,8 @@ void populate_sm(SM &sm, int block_linear_id, int block_threads,
       lane.active = true;
       warp.lanes.push_back(std::move(lane));
     }
-    warp.active_mask = (1u << lane_count) - 1u;
+    warp.active_mask =
+        lane_count == 32 ? 0xffffffffu : ((1u << lane_count) - 1u);
     sm.warps.push_back(std::move(warp));
   }
 }
