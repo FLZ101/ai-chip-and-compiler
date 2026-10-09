@@ -6,9 +6,12 @@ from dataclasses import dataclass, field
 
 _DTYPE_WIDTHS = {
     "f32": 4,
+    "f64": 8,
     "f16": 2,
     "bf16": 2,
     "i32": 4,
+    "i64": 8,
+    "i1": 1,
     "i8": 1,
     "u8": 1,
     "i4": 0.5,

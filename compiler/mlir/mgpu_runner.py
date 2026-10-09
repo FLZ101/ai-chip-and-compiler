@@ -375,9 +375,12 @@ _ALIAS_MEMREF_OPS = (
 
 _DTYPE_MAP = {
     "f32": "f32",
+    "f64": "f64",
     "f16": "f16",
     "bf16": "bf16",
     "i32": "i32",
+    "i64": "i64",
+    "i1": "i1",
     "i8": "i8",
     "ui8": "u8",
     "i4": "i4",
@@ -489,12 +492,16 @@ def _parse_memref_type(memref_type: str) -> tuple[tuple[int, ...], str] | None:
     inner = memref_type[len("memref<") : -1]
     shape_and_dtype = _split_top_level(inner, ",")[0]
     parts = shape_and_dtype.split("x")
-    if len(parts) < 2:
-        return None
-    dtype = parts[-1]
-    try:
-        shape = tuple(int(part) for part in parts[:-1])
-    except ValueError:
+    if len(parts) == 1:
+        dtype = parts[0]
+        shape: tuple[int, ...] = ()
+    elif len(parts) >= 2:
+        dtype = parts[-1]
+        try:
+            shape = tuple(int(part) for part in parts[:-1])
+        except ValueError:
+            return None
+    else:
         return None
     return shape, dtype
 
