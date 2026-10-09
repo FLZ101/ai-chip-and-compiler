@@ -359,6 +359,21 @@ def MGPU_MemoryLayoutOp : MGPU_Op<"memory_layout", [NoMemoryEffect]> {
   }];
 }
 
+def MGPU_Conv2DOp : MGPU_Op<"conv2d", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "2D convolution with optional bias";
+  let arguments = (ins AnyMemRef:$image,
+                       AnyMemRef:$weight,
+                       AnyMemRef:$bias,
+                       AnyMemRef:$output,
+                       UnitAttr:$hasBias);
+  let results = (outs);
+  let assemblyFormat = [{
+    $image `,` $weight `,` $bias `,` $output
+    attr-dict
+    `:` type($image) `,` type($weight) `,` type($bias) `,` type($output)
+  }];
+}
+
 def MGPU_QuantOp : MGPU_Op<"quant", [Pure]> {
   let summary = "Quantize a value using scale and zero point";
   let arguments = (ins AnyType:$input,

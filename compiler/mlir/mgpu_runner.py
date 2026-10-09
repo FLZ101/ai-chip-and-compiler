@@ -92,9 +92,7 @@ def lower_with_mgpu_opt(
     output_names = [value.name for value in graph.outputs]
     buffers = [f"%arg{index}" for index in range(len(input_names))]
     buffers.extend(f"%v{index}" for index in range(len(output_names)))
-    types = [
-        builder._memref_type_for(value.shape, value.dtype) for value in graph.inputs
-    ]
+    types = [builder._effective_input_type(graph, value) for value in graph.inputs]
     types.extend(
         builder._memref_type_for(value.shape, value.dtype) for value in graph.outputs
     )

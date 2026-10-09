@@ -536,13 +536,20 @@ class MLIRBuilder:
                 f"{indent}}}",
             ]
 
+        bias_name = (
+            self._value_names[node.inputs[2].name]
+            if len(node.inputs) == 3
+            else self._value_names[image.name]
+        )
+        bias_type = (
+            self._memref_type(node.inputs[2]) if len(node.inputs) == 3 else image_type
+        )
+        attr_text = "hasBias" if len(node.inputs) == 3 else ""
+        attr_text = "{" + attr_text + "}" if attr_text else "{}"
         return [
-            f"{indent}linalg.conv_2d_nchw_fchw {{",
-            f"{indent}  dilations = {_dense_i64_2(dilations)},",
-            f"{indent}  strides = {_dense_i64_2(strides)}",
-            f"{indent}}} ins({self._value_names[image.name]}, "
-            f"{self._value_names[weight.name]} : {image_type}, {weight_type}) "
-            f"outs({result_name} : {out_type})",
+            f"{indent}mgpu.conv2d {self._value_names[image.name]}, "
+            f"{self._value_names[weight.name]}, {bias_name}, {result_name} "
+            f"{attr_text} : {image_type}, {weight_type}, {bias_type}, {out_type}"
         ]
 
     def _emit_depthwise_conv2d(

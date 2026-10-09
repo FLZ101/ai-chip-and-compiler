@@ -2377,20 +2377,40 @@ struct MGpuToIsaPass
   }
 
   std::optional<IsaText> emitConvIsa(mgpu::LaunchOp launch) {
-    SmallVector<linalg::Conv2DNchwFchwOp> convs;
+    Value imageValue;
+    Value weightValue;
+    Value outputValue;
+    Value biasValue;
+    bool hasBias = false;
+
+    SmallVector<mgpu::Conv2DOp> customConvs;
     launch.getBody().front().walk(
-        [&](linalg::Conv2DNchwFchwOp conv) { convs.push_back(conv); });
-    if (convs.empty())
-      return std::nullopt;
+        [&](mgpu::Conv2DOp conv) { customConvs.push_back(conv); });
+    if (!customConvs.empty()) {
+      auto conv = customConvs.front();
+      imageValue = conv.getImage();
+      weightValue = conv.getWeight();
+      outputValue = conv.getOutput();
+      hasBias = conv.getHasBias();
+      biasValue = hasBias ? conv.getBias() : imageValue;
+    } else {
+      SmallVector<linalg::Conv2DNchwFchwOp> convs;
+      launch.getBody().front().walk(
+          [&](linalg::Conv2DNchwFchwOp conv) { convs.push_back(conv); });
+      if (convs.empty())
+        return std::nullopt;
+      auto conv = convs.front();
+      auto dstOp = cast<DestinationStyleOpInterface>(conv.getOperation());
+      if (dstOp.getDpsInputs().size() < 2 || dstOp.getDpsInits().empty())
+        return std::nullopt;
+      imageValue = dstOp.getDpsInputs()[0];
+      weightValue = dstOp.getDpsInputs()[1];
+      outputValue = dstOp.getDpsInits()[0];
+    }
 
-    linalg::Conv2DNchwFchwOp conv = convs.front();
-    auto dstOp = cast<DestinationStyleOpInterface>(conv.getOperation());
-    if (dstOp.getDpsInputs().size() < 2 || dstOp.getDpsInits().empty())
-      return std::nullopt;
-
-    auto imageType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
-    auto weightType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[1].getType());
-    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    auto imageType = dyn_cast<MemRefType>(imageValue.getType());
+    auto weightType = dyn_cast<MemRefType>(weightValue.getType());
+    auto outputType = dyn_cast<MemRefType>(outputValue.getType());
     if (!imageType || !weightType || !outputType)
       return std::nullopt;
     if (imageType.getRank() != 4 || weightType.getRank() != 4 ||
@@ -2417,9 +2437,10 @@ struct MGpuToIsaPass
     if (spatialSize > 16 || reductionSize > 16 || f > 16)
       return std::nullopt;
 
-    int64_t imageBase = bufferMap.base(dstOp.getDpsInputs()[0]);
-    int64_t weightBase = bufferMap.base(dstOp.getDpsInputs()[1]);
-    int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
+    int64_t imageBase = bufferMap.base(imageValue);
+    int64_t weightBase = bufferMap.base(weightValue);
+    int64_t outputBase = bufferMap.base(outputValue);
+    int64_t biasBase = hasBias ? bufferMap.base(biasValue) : 0;
 
     std::string code;
     llvm::raw_string_ostream os(code);
@@ -2455,8 +2476,13 @@ struct MGpuToIsaPass
        << "MUL R7, R3, 16\n"
        << "ADD R7, R7, R1\n"
        << "MUL R7, R7, 4\n"
-       << "LDS R8, [R7]\n"
-       << "MUL R9, R1, " << oh << "\n"
+       << "LDS R8, [R7]\n";
+    if (hasBias)
+      os << "MUL R10, R1, 4\n"
+         << "ADD R10, R10, " << biasBase << "\n"
+         << "LDG R11, [R10]\n"
+         << "ADD R8, R8, R11\n";
+    os << "MUL R9, R1, " << oh << "\n"
        << "ADD R9, R9, R4\n"
        << "MUL R9, R9, " << ow << "\n"
        << "ADD R9, R9, R6\n"

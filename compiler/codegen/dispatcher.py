@@ -67,20 +67,12 @@ def lower_kernel(
     if node.op in CPP_SUPPORTED_OPS:
         from ..mlir.mgpu_runner import MGpuOptError, lower_with_mgpu_opt
 
-        standalone = (
-            len(graph.nodes) == 1
-            and {value.name for value in graph.inputs}
-            == {value.name for value in node.inputs}
-            and {value.name for value in graph.outputs}
-            == {value.name for value in node.outputs}
-        )
         if node.op == Op.CONV2D and len(node.inputs) != 2:
-            standalone = False
+            return lower_kernel_python(graph, mlir_text, layout)
         try:
-            if standalone:
-                return lower_with_mgpu_opt(graph, mlir_text, layout)
+            return lower_with_mgpu_opt(graph, mlir_text, layout)
         except MGpuOptError:
-            pass
+            raise
 
     return lower_kernel_python(graph, mlir_text, layout)
 

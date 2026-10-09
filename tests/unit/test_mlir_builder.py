@@ -60,7 +60,7 @@ class TestMLIRBuilder(unittest.TestCase):
     def test_conv2d_emits_linalg_conv(self):
         text = MLIRBuilder().build(self._conv_graph())
 
-        self.assertIn("linalg.conv_2d_nchw_fchw", text)
+        self.assertIn("mgpu.conv2d", text)
         self.assertIn("memref<1x3x8x8xf32>", text)
         self.assertIn("memref<4x3x3x3xf32>", text)
         self.assertIn("memref<1x4x6x6xf32>", text)
