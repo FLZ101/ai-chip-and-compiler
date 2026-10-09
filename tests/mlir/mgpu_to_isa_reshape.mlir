@@ -2,7 +2,7 @@
 // CHECK: func.func @reshape
 // CHECK: "mgpu.isa"()
 // CHECK-SAME: code = "MOV R0, ctaid.x
-// CHECK-SAME: STG [R3 + 64], R5
+// CHECK-SAME: ADD R4, R4, 64
 
 module {
   func.func @reshape(%arg0: memref<16xf32>) -> memref<4x4xf32> {

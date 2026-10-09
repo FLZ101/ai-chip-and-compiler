@@ -1506,14 +1506,18 @@ struct MGpuToIsaPass
     int64_t n = 1;
     for (int64_t dim : outType.getShape())
       n *= dim;
-    int64_t outDelta = memrefByteSize(inputType);
+    int64_t inputBase = bufferMap.base(ops.front().getInput());
+    int64_t outBase = bufferMap.base(ops.front().getOutput());
 
     std::string code;
     llvm::raw_string_ostream os(code);
     emitCnnPrologue(os, n);
     os << "MUL R3, R0, 4\n"
+       << "ADD R3, R3, " << inputBase << "\n"
        << "LDG R5, [R3]\n"
-       << "STG [R3 + " << outDelta << "], R5\n";
+       << "MUL R4, R0, 4\n"
+       << "ADD R4, R4, " << outBase << "\n"
+       << "STG [R4], R5\n";
     emitCnnFinish(os);
     os.flush();
 
@@ -1538,7 +1542,8 @@ struct MGpuToIsaPass
       return std::nullopt;
     int64_t rows = inputType.getShape()[0];
     int64_t cols = inputType.getShape()[1];
-    int64_t outBase = memrefByteSize(inputType);
+    int64_t inputBase = bufferMap.base(ops.front().getInput());
+    int64_t outBase = bufferMap.base(ops.front().getOutput());
 
     std::string code;
     llvm::raw_string_ostream os(code);
@@ -1547,6 +1552,7 @@ struct MGpuToIsaPass
        << "MUL R2, R0, " << cols << "\n"
        << "ADD R2, R2, R1\n"
        << "MUL R2, R2, 4\n"
+       << "ADD R2, R2, " << inputBase << "\n"
        << "LDG R4, [R2]\n"
        << "MUL R5, R1, " << rows << "\n"
        << "ADD R5, R5, R0\n"
@@ -1579,8 +1585,9 @@ struct MGpuToIsaPass
     int64_t firstLen = firstType.getShape()[0];
     int64_t secondLen = secondType.getShape()[0];
     int64_t n = outType.getShape()[0];
-    int64_t secondBase = memrefByteSize(firstType);
-    int64_t outBase = secondBase + memrefByteSize(secondType);
+    int64_t firstBase = bufferMap.base(op.getFirst());
+    int64_t secondBase = bufferMap.base(op.getSecond());
+    int64_t outBase = bufferMap.base(op.getOutput());
 
     std::string code;
     llvm::raw_string_ostream os(code);
@@ -1591,6 +1598,7 @@ struct MGpuToIsaPass
        << "BRA second\n"
        << "first:\n"
        << "MUL R4, R0, 4\n"
+       << "ADD R4, R4, " << firstBase << "\n"
        << "LDG R6, [R4]\n"
        << "BRA store\n"
        << "second:\n"
@@ -1630,7 +1638,8 @@ struct MGpuToIsaPass
     int64_t n = outType.getShape()[0];
     int64_t start = op.getStart();
     int64_t step = op.getStep();
-    int64_t outBase = memrefByteSize(inputType);
+    int64_t inputBase = bufferMap.base(op.getInput());
+    int64_t outBase = bufferMap.base(op.getOutput());
 
     std::string code;
     llvm::raw_string_ostream os(code);
@@ -1639,6 +1648,7 @@ struct MGpuToIsaPass
        << "MUL R2, R2, " << step << "\n"
        << "ADD R2, R2, " << start << "\n"
        << "MUL R2, R2, 4\n"
+       << "ADD R2, R2, " << inputBase << "\n"
        << "LDG R4, [R2]\n"
        << "MUL R5, R0, 4\n"
        << "ADD R5, R5, " << outBase << "\n"
@@ -1668,7 +1678,8 @@ struct MGpuToIsaPass
     int64_t before = op.getBefore();
     int64_t inputLen = inputType.getShape()[0];
     int64_t n = outType.getShape()[0];
-    int64_t outBase = memrefByteSize(inputType);
+    int64_t inputBase = bufferMap.base(op.getInput());
+    int64_t outBase = bufferMap.base(op.getOutput());
     double value = op.getValue().convertToDouble();
 
     std::string code;
@@ -1685,6 +1696,7 @@ struct MGpuToIsaPass
        << "MOV R9, " << (inputLen - 1) << "\n"
        << "MIN R10, R10, R9\n"
        << "MUL R10, R10, 4\n"
+       << "ADD R10, R10, " << inputBase << "\n"
        << "LDG R12, [R10]\n"
        << "MOV R13, " << value << "\n"
        << "SEL R14, R8, R12, R13\n"
@@ -1715,7 +1727,8 @@ struct MGpuToIsaPass
       return std::nullopt;
     int64_t inputLen = inputType.getShape()[0];
     int64_t outputLen = outType.getShape()[0];
-    int64_t outBase = memrefByteSize(inputType);
+    int64_t inputBase = bufferMap.base(ops.front().getInput());
+    int64_t outBase = bufferMap.base(ops.front().getOutput());
 
     std::string code;
     llvm::raw_string_ostream os(code);
@@ -1725,6 +1738,7 @@ struct MGpuToIsaPass
        << "MOV R3, " << outputLen << "\n"
        << "IDIV R4, R2, R3\n"
        << "MUL R4, R4, 4\n"
+       << "ADD R4, R4, " << inputBase << "\n"
        << "LDG R6, [R4]\n"
        << "MUL R7, R0, 4\n"
        << "ADD R7, R7, " << outBase << "\n"
