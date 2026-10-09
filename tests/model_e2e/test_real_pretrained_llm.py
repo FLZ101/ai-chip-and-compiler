@@ -60,6 +60,28 @@ class TestPretrainedLLMImport(unittest.TestCase):
         self.assertNotIn("torch.aten", canonicalized.text)
         self.assertTrue(canonicalized.mlir_module.operation.verify())
 
+    def test_full_gpt2_small_imports_without_cache(self):
+        from transformers import GPT2LMHeadModel
+
+        model = GPT2LMHeadModel.from_pretrained(
+            str(GPT2_CACHE.parent),
+            local_files_only=True,
+        ).eval()
+        example = torch.zeros(1, 8, dtype=torch.long)
+
+        imported = TorchMLIRImporter().import_module(
+            model,
+            example,
+            example_kwargs={"use_cache": False},
+            func_name="gpt2_small",
+        )
+        canonicalized = MLIRCanonicalizer().canonicalize(imported)
+
+        self.assertEqual(canonicalized.source, "fx")
+        self.assertEqual(canonicalized.target, "linalg-on-tensors")
+        self.assertNotIn("torch.aten", canonicalized.text)
+        self.assertTrue(canonicalized.mlir_module.operation.verify())
+
 
 if __name__ == "__main__":
     unittest.main()
