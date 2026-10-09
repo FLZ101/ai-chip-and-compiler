@@ -57,6 +57,7 @@ def build_full_gpt2_graph(
     hidden: int = 768,
     heads: int = 12,
     layers: int = 12,
+    output_logits: bool = False,
 ):
     head_dim = hidden // heads
     mlp_hidden = 4 * hidden
@@ -90,9 +91,12 @@ def build_full_gpt2_graph(
         q = frontend.linear(hidden_states, q_w, q_b)
         k = frontend.linear(hidden_states, k_w, k_b)
         v = frontend.linear(hidden_states, v_w, v_b)
-        q = frontend.reshape(q, (1, heads, seq, head_dim))
-        k = frontend.reshape(k, (1, heads, seq, head_dim))
-        v = frontend.reshape(v, (1, heads, seq, head_dim))
+        q = frontend.reshape(q, (1, seq, heads, head_dim))
+        q = frontend.transpose(q, (0, 2, 1, 3))
+        k = frontend.reshape(k, (1, seq, heads, head_dim))
+        k = frontend.transpose(k, (0, 2, 1, 3))
+        v = frontend.reshape(v, (1, seq, heads, head_dim))
+        v = frontend.transpose(v, (0, 2, 1, 3))
         attention = frontend.masked_attention(
             q,
             k,
@@ -100,6 +104,7 @@ def build_full_gpt2_graph(
             causal_mask,
             scale=1.0 / (head_dim**0.5),
         )
+        attention = frontend.transpose(attention, (0, 2, 1, 3))
         attention = frontend.reshape(attention, (1, seq, hidden))
         attention = frontend.linear(attention, out_w, out_b)
         hidden_states = frontend.add(residual, attention)
@@ -123,8 +128,11 @@ def build_full_gpt2_graph(
 
     hidden_states = frontend.layer_norm(hidden_states, final_ln_weight, final_ln_bias)
     logits = frontend.linear(hidden_states, lm_head)
-    next_token = frontend.argmax(logits, axis=-1)
-    frontend.output(next_token)
+    if output_logits:
+        frontend.output(logits)
+    else:
+        next_token = frontend.argmax(logits, axis=-1)
+        frontend.output(next_token)
     return frontend.build()
 
 
