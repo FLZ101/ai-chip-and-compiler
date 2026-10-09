@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -442,6 +443,57 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
             atol=1e-4,
         )
         np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-4, atol=1e-4)
+
+    def test_gpt2_large_linear_software_reference(self):
+        rng = np.random.default_rng(24)
+        for m, k, n in ((8, 768, 3072), (8, 3072, 768)):
+            with self.subTest(m=m, k=k, n=n):
+                x = rng.normal(size=(m, k)).astype(np.float32)
+                w = rng.normal(size=(n, k)).astype(np.float32)
+                b = rng.normal(size=(n,)).astype(np.float32)
+                frontend = ManualFrontend("gpt2_linear")
+                value = frontend.add_input("x", DType.F32, x.shape)
+                weight = frontend.add_input("w", DType.F32, w.shape)
+                bias = frontend.add_input("b", DType.F32, b.shape)
+                frontend.output(frontend.linear(value, weight, bias))
+                expected = x @ w.T + b
+                result = run_software_model_e2e(
+                    make_device(global_size=1 << 28, sm_count=16),
+                    frontend.build(),
+                    {"x": x, "w": w, "b": b},
+                    [expected],
+                    rtol=1e-3,
+                    atol=1e-3,
+                )
+                np.testing.assert_allclose(
+                    result.outputs[0], expected, rtol=1e-3, atol=1e-3
+                )
+
+    @unittest.skipUnless(
+        os.environ.get("MGPU_RUN_LARGE_LINEAR") == "1",
+        "set MGPU_RUN_LARGE_LINEAR=1 to run the full vocab linear gate",
+    )
+    def test_gpt2_vocab_linear_software_reference(self):
+        rng = np.random.default_rng(25)
+        m, k, n = 8, 768, 50257
+        x = rng.normal(size=(m, k)).astype(np.float32)
+        w = rng.normal(size=(n, k)).astype(np.float32)
+        b = rng.normal(size=(n,)).astype(np.float32)
+        frontend = ManualFrontend("gpt2_vocab_linear")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        weight = frontend.add_input("w", DType.F32, w.shape)
+        bias = frontend.add_input("b", DType.F32, b.shape)
+        frontend.output(frontend.linear(value, weight, bias))
+        expected = x @ w.T + b
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 28, sm_count=16),
+            frontend.build(),
+            {"x": x, "w": w, "b": b},
+            [expected],
+            rtol=1e-3,
+            atol=1e-3,
+        )
+        np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-3, atol=1e-3)
 
     def test_resize_software_matches_mgpu(self):
         image = np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)

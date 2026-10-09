@@ -36,6 +36,25 @@ def _attention_mlir(batch: int, heads: int, seq: int, dim: int, scale: float) ->
 }}"""
 
 
+def _attention_mlir_broadcast_mask(
+    batch: int, heads: int, seq: int, dim: int, scale: float
+) -> str:
+    """Build rank-4 attention MLIR with a broadcast `[1, 1, seq, seq]` mask."""
+    return f"""module {{
+  func.func @attention(
+      %q: memref<{batch}x{heads}x{seq}x{dim}xf32>, %k: memref<{batch}x{heads}x{seq}x{dim}xf32>,
+      %v: memref<{batch}x{heads}x{seq}x{dim}xf32>, %mask: memref<1x1x{seq}x{seq}xf32>,
+      %out: memref<{batch}x{heads}x{seq}x{dim}xf32>) {{
+    %c1 = arith.constant 1 : index
+    mgpu.launch blocks(%c1, %c1, %c1) threads(%c1, %c1, %c1) {{
+      mgpu.attention %q, %k, %v, %mask, %out {{scale = {scale} : f32, masked}} : memref<{batch}x{heads}x{seq}x{dim}xf32>, memref<{batch}x{heads}x{seq}x{dim}xf32>, memref<{batch}x{heads}x{seq}x{dim}xf32>, memref<1x1x{seq}x{seq}xf32>, memref<{batch}x{heads}x{seq}x{dim}xf32>
+      mgpu.return
+    }}
+    return
+  }}
+}}"""
+
+
 def _run_softmax_stage(q, k, v, mask):
     """Run the tiled score + softmax stage and return the Python device."""
     seq = q.shape[2]
@@ -95,6 +114,27 @@ def _run_mapped_full_attention(q, k, v, mask):
     result = run_mgpu_pipeline(
         _attention_mlir(batch, heads, seq, dim, scale),
         pipeline=("builtin.module(func.func(" "mgpu-to-isa{emit-attention-tiled}))"),
+    )
+    program = parse_asm(result.code)
+    python_launch(device, program, grid_dim=result.grid, block_dim=result.block)
+    return read_tensor(device, layout["out"]), result.grid
+
+
+def _run_mapped_full_attention_broadcast_mask(q, k, v, mask):
+    """Run mapped attention with a broadcast mask and return output/grid."""
+    batch, heads, seq, dim = q.shape
+    scale = 1.0 / np.sqrt(dim)
+    out = np.zeros_like(q)
+
+    device = create_device(global_size=1 << 22, sm_count=4, shared_size=1 << 16)
+    layout = allocate_global_buffers(
+        device,
+        {"q": q, "k": k, "v": v, "mask": mask, "out": out},
+    )
+
+    result = run_mgpu_pipeline(
+        _attention_mlir_broadcast_mask(batch, heads, seq, dim, scale),
+        pipeline="builtin.module(func.func(mgpu-to-isa))",
     )
     program = parse_asm(result.code)
     python_launch(device, program, grid_dim=result.grid, block_dim=result.block)
@@ -214,11 +254,31 @@ class TestTiledAttentionKernels(unittest.TestCase):
     def test_mapped_attention_multi_query_tile(self):
         self._check_mapped_attention(batch=1, heads=2, seq=20, dim=24)
 
+    def test_mapped_attention_broadcast_mask(self):
+        rng = np.random.default_rng(124)
+        batch, heads, seq, dim = 1, 2, 8, 16
+        q = rng.normal(size=(batch, heads, seq, dim)).astype(np.float32)
+        k = rng.normal(size=(batch, heads, seq, dim)).astype(np.float32)
+        v = rng.normal(size=(batch, heads, seq, dim)).astype(np.float32)
+        mask = np.tril(np.ones((seq, seq), dtype=np.float32)).reshape(1, 1, seq, seq)
+        scale = 1.0 / np.sqrt(dim)
+
+        actual, grid = _run_mapped_full_attention_broadcast_mask(q, k, v, mask)
+        self.assertEqual(grid, (heads, 1, 1))
+
+        scores = np.matmul(q, np.swapaxes(k, -1, -2)) * scale
+        scores = np.where(mask == 0, -np.inf, scores)
+        shifted = scores - np.max(scores, axis=-1, keepdims=True)
+        exp = np.exp(shifted)
+        weights = exp / np.sum(exp, axis=-1, keepdims=True)
+        expected = np.matmul(weights, v)
+        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
+
     def test_attention_mgpu_matches_software(self):
         rng = np.random.default_rng(321)
-        q = rng.normal(size=(1, 1, 8, 16)).astype(np.float32)
-        k = rng.normal(size=(1, 1, 8, 16)).astype(np.float32)
-        v = rng.normal(size=(1, 1, 8, 16)).astype(np.float32)
+        q = rng.normal(size=(1, 2, 8, 16)).astype(np.float32)
+        k = rng.normal(size=(1, 2, 8, 16)).astype(np.float32)
+        v = rng.normal(size=(1, 2, 8, 16)).astype(np.float32)
         mask = np.tril(np.ones((8, 8), dtype=np.float32)).reshape(1, 1, 8, 8)
         scale = 1.0 / np.sqrt(16.0)
 

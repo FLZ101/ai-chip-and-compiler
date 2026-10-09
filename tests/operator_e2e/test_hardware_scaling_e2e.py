@@ -209,6 +209,20 @@ class TestHardwareScalingEndToEnd(unittest.TestCase):
         )
         self.assertIn("linear_loop", result.isa_text)
 
+    def test_gpt2_linear_shapes_lower_to_bounded_isa(self):
+        for m, k, n in ((8, 768, 3072), (8, 3072, 768), (8, 768, 50257)):
+            with self.subTest(m=m, k=k, n=n):
+                frontend = ManualFrontend("gpt2_linear_lowering")
+                value = frontend.add_input("x", DType.F32, (m, k))
+                weight = frontend.add_input("w", DType.F32, (n, k))
+                bias = frontend.add_input("b", DType.F32, (n,))
+                frontend.output(frontend.linear(value, weight, bias))
+
+                result = run_mgpu_pipeline(MLIRBuilder().build(frontend.build()))
+                expected_grid = (m * n + 31) // 32
+                self.assertEqual(result.grid, (expected_grid, 1, 1))
+                self.assertIn("linear_loop", result.code)
+
     def test_masked_softmax_runs_in_simulator(self):
         logits = np.asarray([[1.0, 2.0, 3.0], [-1.0, 0.0, 1.0]], np.float32)
         mask = np.asarray([[1.0, 1.0, 0.0], [1.0, 0.0, 1.0]], np.float32)
