@@ -104,11 +104,15 @@ class TestRealCNNExecution(unittest.TestCase):
             [expected],
             lowering=lower_kernel,
             atol=1e-4,
+            profile=True,
         )
 
         self.assertIn("mgpu.conv2d", result.mlir_text)
         self.assertIn("mgpu.batch_norm", result.mlir_text)
         np.testing.assert_allclose(result.outputs[0], expected, atol=1e-4)
+        self.assertGreater(result.cycles, 0)
+        self.assertIsNotNone(result.profile)
+        self.assertGreater(result.profile.issued_instructions, 0)
 
     def test_full_resnet18_graph_has_final_logits(self):
         model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()

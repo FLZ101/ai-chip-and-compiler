@@ -1,32 +1,47 @@
 # Numerical Tolerances
 
-This document describes the numerical comparison policy used by the E2E test
-harness.
+This document records the numerical gates used by the ResNet18 execution
+tests.  The simulator uses IEEE-754 FP32 arithmetic, but the compiler may
+reorder reductions and use approximations such as `RSQRT` and `EXP2`.  Tolerances
+are intentionally a little looser than machine epsilon to absorb those
+differences without hiding real bugs.
 
-## Default tolerances
+## Cropped pretrained stem
 
-The shared harness in
-[../tests/operator_e2e/helpers.py](../tests/operator_e2e/helpers.py) defaults to:
+Path:
 
-- relative tolerance `rtol = 1e-5`
-- absolute tolerance `atol = 1e-6`
+```text
+conv7x7 -> BatchNorm2d -> ReLU
+```
 
-Tests may override these values for operators whose reference formula is
-approximate.
+- input: `1x3x4x4`
+- reference: PyTorch on the same pretrained weights
+- tolerance: `atol = 1e-4`
+- profile gate: `cycles > 0`, `issued_instructions > 0`
 
-## Operator notes
+This is the default CI smoke test.  It is intentionally cropped because the
+Python functional simulator is too slow to run the full `224x224` model on
+every test run.
 
-- `GELU` uses the common `tanh` approximation in both the simulator and the
-  NumPy reference, so its comparison is intentionally formula-consistent.
-- Attention and softmax use `max` subtraction, `EXP2`, and `RCP`; tests allow
-  `atol = 1e-5` because of repeated FP32 special-function rounding.
-- CNN, normalization, and detection helpers use direct arithmetic and default
-  tolerances.
-- Shape/layout copy kernels are expected to match exactly, but the shared
-  harness still uses the default tolerance for consistency.
+## Full ResNet18 forward
 
-## Policy
+Path:
 
-Tests must compare against deterministic NumPy references.  Silent loose
-tolerances are discouraged; when a larger tolerance is required, the test
-should document why near the assertion.
+```text
+image -> stem -> 4 residual stages -> global average pool -> flatten -> Linear
+```
+
+- input: `1x3x224x224`
+- reference: PyTorch `resnet18(weights=ResNet18_Weights.DEFAULT)`
+- tolerance: `atol = 5e-3`, `rtol = 5e-3`
+- profile gate: `cycles > 0`, profile snapshot is present
+- opt-in variable: `MGPU_FULL_RESNET18=1`
+
+Run this only when performance is not a concern:
+
+```bash
+MGPU_FULL_RESNET18=1 python -m unittest \
+  tests.model_e2e.test_real_cnn_execution.TestRealCNNExecution.test_full_resnet18_forward_runs_in_simulator
+```
+
+The full test is skipped in normal `unittest discover` runs.
