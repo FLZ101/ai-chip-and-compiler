@@ -1098,10 +1098,10 @@ struct MGpuToIsaPass
     int64_t rows = xType.getShape()[0];
     int64_t dim = xType.getShape()[1];
     int64_t total = rows * dim;
-    int64_t xBase = 0;
-    int64_t cosBase = memrefByteSize(xType);
-    int64_t sinBase = cosBase + memrefByteSize(cosType);
-    int64_t outBase = sinBase + memrefByteSize(sinType);
+    int64_t xBase = bufferMap.base(op.getX());
+    int64_t cosBase = bufferMap.base(op.getCos());
+    int64_t sinBase = bufferMap.base(op.getSin());
+    int64_t outBase = bufferMap.base(op.getOutput());
 
     std::string code;
     llvm::raw_string_ostream os(code);
@@ -1161,6 +1161,7 @@ struct MGpuToIsaPass
     int64_t qLen = outType.getShape()[2];
     int64_t kLen = outType.getShape()[3];
     int64_t total = qLen * kLen;
+    int64_t outputBase = bufferMap.base(ops.front().getOutput());
 
     std::string code;
     llvm::raw_string_ostream os(code);
@@ -1170,6 +1171,7 @@ struct MGpuToIsaPass
        << "SUB R3, R0, R2\n"
        << "CMP.GE R4, R1, R3\n"
        << "MUL R5, R0, 4\n"
+       << "ADD R5, R5, " << outputBase << "\n"
        << "STG [R5], R4\n";
     emitCnnFinish(os);
     os.flush();
@@ -1194,10 +1196,9 @@ struct MGpuToIsaPass
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
     if (!cacheType || !valueType || !outType)
       return std::nullopt;
-    int64_t cacheBytes = memrefByteSize(cacheType);
-    int64_t valueBytes = memrefByteSize(valueType);
-    int64_t valueBase = cacheBytes;
-    int64_t outBase = cacheBytes + valueBytes;
+    int64_t cacheBase = bufferMap.base(op.getCache());
+    int64_t valueBase = bufferMap.base(op.getValue());
+    int64_t outBase = bufferMap.base(op.getOutput());
     int64_t total = 1;
     for (int64_t dim : outType.getShape())
       total *= dim;
@@ -1205,10 +1206,13 @@ struct MGpuToIsaPass
     std::string code;
     llvm::raw_string_ostream os(code);
     emitCnnPrologue(os, total);
-    os << "MUL R3, R0, 4\n"
-       << "ADD R3, R3, " << valueBase << "\n"
+    os << "MOV R3, " << valueBase << "\n"
+       << "MUL R2, R0, 4\n"
+       << "ADD R3, R3, R2\n"
        << "LDG R5, [R3]\n"
-       << "STG [R3 + " << (outBase - valueBase) << "], R5\n";
+       << "MOV R3, " << outBase << "\n"
+       << "ADD R3, R3, R2\n"
+       << "STG [R3], R5\n";
     emitCnnFinish(os);
     os.flush();
 
@@ -1235,13 +1239,9 @@ struct MGpuToIsaPass
         outType.getShape()[1] != 1)
       return std::nullopt;
 
-    int64_t cacheBytes = memrefByteSize(cacheType);
-    int64_t positionsElements = 1;
-    for (int64_t dim : positionsType.getShape())
-      positionsElements *= dim;
-    int64_t positionsBytes = positionsElements * 4;
-    int64_t positionsBase = cacheBytes;
-    int64_t outBase = cacheBytes + positionsBytes;
+    int64_t cacheBase = bufferMap.base(op.getCache());
+    int64_t positionsBase = bufferMap.base(op.getPositions());
+    int64_t outBase = bufferMap.base(op.getOutput());
     int64_t dim = cacheType.getShape()[3];
     int64_t total = outType.getShape()[2] * dim;
 
@@ -1259,6 +1259,7 @@ struct MGpuToIsaPass
        << "MUL R7, R6, R7\n"
        << "ADD R7, R7, R3\n"
        << "MUL R7, R7, 4\n"
+       << "ADD R7, R7, " << cacheBase << "\n"
        << "LDG R9, [R7]\n"
        << "MUL R10, R0, 4\n"
        << "ADD R10, R10, " << outBase << "\n"
@@ -2572,11 +2573,11 @@ struct MGpuToIsaPass
 
     double scale = attention.getScale().convertToDouble();
     bool masked = attention.getMasked();
-    int64_t qBase = 0;
-    int64_t kBase = seq * dim * 4;
-    int64_t vBase = kBase + seq * dim * 4;
-    int64_t maskBase = vBase + seq * dim * 4;
-    int64_t outputBase = maskBase + seq * seq * 4;
+    int64_t qBase = bufferMap.base(attention.getQ());
+    int64_t kBase = bufferMap.base(attention.getK());
+    int64_t vBase = bufferMap.base(attention.getV());
+    int64_t maskBase = bufferMap.base(attention.getMask());
+    int64_t outputBase = bufferMap.base(attention.getOutput());
     int64_t scoreOffset = 0;
     int64_t outputOffset = 16 * 16 * 4;
 
