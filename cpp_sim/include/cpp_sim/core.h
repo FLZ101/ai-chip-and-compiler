@@ -19,6 +19,19 @@ struct StallCounters {
   int64_t scoreboard = 0;
 };
 
+struct TimingModel {
+  int alu_latency = 4;
+  int special_latency = 8;
+  int control_latency = 1;
+  int barrier_latency = 2;
+  int global_memory_latency = 20;
+  int shared_memory_latency = 4;
+  int global_bandwidth_bytes_per_cycle = 128;
+  int shared_bandwidth_bytes_per_cycle = 128;
+  int bank_count = 32;
+  int shared_swizzle_bits = 3;
+};
+
 struct ProfileCounters {
   int64_t cycles = 0;
   int64_t issued_instructions = 0;
@@ -68,6 +81,7 @@ struct Device {
   ByteMemory global_memory{0, "global"};
   std::vector<SM> sms;
   int register_count = 64;
+  TimingModel timing_model;
   std::vector<int> grid_dim = {1};
   std::vector<int> block_dim = {1};
   int64_t clock = 0;
