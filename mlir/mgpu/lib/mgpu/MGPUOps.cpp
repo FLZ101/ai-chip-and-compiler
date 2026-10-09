@@ -49,5 +49,11 @@ LogicalResult ReturnOp::verify() {
   return success();
 }
 
+LogicalResult MemoryLayoutOp::verify() {
+  if (getBuffers().size() != getOffsets().size())
+    return emitOpError("buffer count must match offset count");
+  return success();
+}
+
 } // namespace mgpu
 } // namespace mlir

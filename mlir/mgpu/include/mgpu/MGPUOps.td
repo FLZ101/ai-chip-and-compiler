@@ -343,6 +343,22 @@ def MGPU_NMSOp : MGPU_Op<"nms", [MemoryEffects<[MemRead, MemWrite]>]> {
   }];
 }
 
+def MGPU_MemoryLayoutOp : MGPU_Op<"memory_layout", [NoMemoryEffect]> {
+  let summary = "Associate memref SSA values with simulator byte offsets";
+  let description = [{
+    ``mgpu.memory_layout`` is consumed by ``mgpu-to-isa``.  It is not a
+    runtime operation; it only carries the host-side buffer placement chosen
+    by the Python driver.
+  }];
+  let arguments = (ins Variadic<AnyMemRef>:$buffers,
+                       DenseI64ArrayAttr:$offsets);
+  let results = (outs);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $buffers `offsets` `=` $offsets attr-dict `:` type($buffers)
+  }];
+}
+
 def MGPU_QuantOp : MGPU_Op<"quant", [Pure]> {
   let summary = "Quantize a value using scale and zero point";
   let arguments = (ins AnyType:$input,
