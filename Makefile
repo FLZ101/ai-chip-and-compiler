@@ -7,7 +7,7 @@ SETUP_STAMP := $(VENV)/.make-setup
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup unit lit test pytest format precommit mgpu-opt clean clean-venv
+.PHONY: help setup unit lit test pytest format precommit mgpu-opt cpp-sim cpp-sim-test benchmark-cpp-sim clean clean-venv
 
 help:
 	@printf "Targets:\n"
@@ -19,6 +19,9 @@ help:
 	@printf "  make format       Format Python code with black\n"
 	@printf "  make precommit    Run all pre-commit hooks\n"
 	@printf "  make mgpu-opt     Download/build MLIR and out-of-tree mgpu-opt\n"
+	@printf "  make cpp-sim      Build the native C++ simulator\n"
+	@printf "  make cpp-sim-test Build and run native C++ simulator tests\n"
+	@printf "  make benchmark-cpp-sim  Compare Python and C++ simulator speed\n"
 	@printf "  make clean        Remove generated caches/test artifacts\n"
 	@printf "  make clean-venv   Remove .venv\n"
 
@@ -50,6 +53,17 @@ precommit: setup
 
 mgpu-opt:
 	./scripts/build_mlir.sh
+
+cpp-sim:
+	cmake -S cpp_sim -B .deps/cpp-sim-build \
+	  -DPython3_EXECUTABLE=$(abspath $(PY))
+	cmake --build .deps/cpp-sim-build -j8
+
+cpp-sim-test: cpp-sim
+	ctest --test-dir .deps/cpp-sim-build --output-on-failure
+
+benchmark-cpp-sim: cpp-sim
+	$(PY) scripts/benchmark_cpp_sim.py
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
