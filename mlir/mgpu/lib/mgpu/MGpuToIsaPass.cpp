@@ -1286,8 +1286,8 @@ struct MGpuToIsaPass
       return std::nullopt;
     int64_t rows = xType.getShape()[0];
     int64_t dim = xType.getShape()[1];
-    int64_t xBase = 0;
-    int64_t outBase = memrefByteSize(xType);
+    int64_t xBase = bufferMap.base(ops.front().getX());
+    int64_t outBase = bufferMap.base(ops.front().getOutput());
 
     std::string code;
     llvm::raw_string_ostream os(code);
@@ -1360,10 +1360,10 @@ struct MGpuToIsaPass
       return std::nullopt;
     int64_t rows = xType.getShape()[0];
     int64_t dim = xType.getShape()[1];
-    int64_t xBase = 0;
-    int64_t weightBase = memrefByteSize(xType);
-    int64_t biasBase = weightBase + memrefByteSize(weightType);
-    int64_t outBase = biasBase + memrefByteSize(biasType);
+    int64_t xBase = bufferMap.base(op.getX());
+    int64_t weightBase = bufferMap.base(op.getWeight());
+    int64_t biasBase = bufferMap.base(op.getBias());
+    int64_t outBase = bufferMap.base(op.getOutput());
     double eps = 1e-5;
 
     std::string code;
@@ -1440,9 +1440,9 @@ struct MGpuToIsaPass
       return std::nullopt;
     int64_t rows = xType.getShape()[0];
     int64_t dim = xType.getShape()[1];
-    int64_t xBase = 0;
-    int64_t weightBase = memrefByteSize(xType);
-    int64_t outBase = weightBase + memrefByteSize(weightType);
+    int64_t xBase = bufferMap.base(op.getX());
+    int64_t weightBase = bufferMap.base(op.getWeight());
+    int64_t outBase = bufferMap.base(op.getOutput());
     double eps = 1e-5;
 
     std::string code;
