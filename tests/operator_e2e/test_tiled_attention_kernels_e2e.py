@@ -7,7 +7,7 @@ from hw.core import launch as python_launch
 from hw.device import create_device
 from hw.isa import parse_asm
 
-from .helpers import allocate_global_buffers
+from .helpers import allocate_global_buffers, read_tensor
 
 
 def _attention_mlir(seq: int, dim: int, scale: float) -> str:
@@ -49,6 +49,28 @@ def _run_softmax_stage(q, k, v, mask):
     return device
 
 
+def _run_full_attention(q, k, v, mask):
+    """Run the complete tiled attention kernel and return its output."""
+    seq = q.shape[2]
+    dim = q.shape[3]
+    scale = 1.0 / np.sqrt(dim)
+    out = np.zeros_like(q)
+
+    device = create_device(global_size=1 << 22, sm_count=4, shared_size=1 << 16)
+    layout = allocate_global_buffers(
+        device,
+        {"q": q, "k": k, "v": v, "mask": mask, "out": out},
+    )
+
+    result = run_mgpu_pipeline(
+        _attention_mlir(seq, dim, scale),
+        pipeline=("builtin.module(func.func(" "mgpu-to-isa{emit-attention-tiled}))"),
+    )
+    program = parse_asm(result.code)
+    python_launch(device, program, grid_dim=result.grid, block_dim=result.block)
+    return read_tensor(device, layout["out"])
+
+
 def _read_softmax_weights(device, seq: int) -> np.ndarray:
     """Reconstruct seq x seq softmax weights from padded 16x16 score tiles."""
     tile_count = (seq + 15) // 16
@@ -79,8 +101,13 @@ def _softmax_reference(q, k, scale, mask):
     return exp / np.sum(exp, axis=-1, keepdims=True)
 
 
+def _attention_reference(q, k, v, scale, mask):
+    weights = _softmax_reference(q, k, scale, mask)
+    return np.matmul(weights, v)
+
+
 class TestTiledAttentionKernels(unittest.TestCase):
-    """Numerical coverage for the tiled MMA attention softmax stage."""
+    """Numerical coverage for the tiled MMA attention stages."""
 
     def _check_softmax(self, seq: int, dim: int):
         rng = np.random.default_rng(31)
@@ -102,6 +129,33 @@ class TestTiledAttentionKernels(unittest.TestCase):
 
     def test_masked_softmax_tiled(self):
         self._check_softmax(seq=32, dim=32)
+
+    def _check_full_attention(self, seq: int, dim: int):
+        rng = np.random.default_rng(77)
+        q = rng.normal(size=(1, 1, seq, dim)).astype(np.float32)
+        k = rng.normal(size=(1, 1, seq, dim)).astype(np.float32)
+        v = rng.normal(size=(1, 1, seq, dim)).astype(np.float32)
+        mask = np.tril(np.ones((seq, seq), dtype=np.float32)).reshape(1, 1, seq, seq)
+        scale = 1.0 / np.sqrt(dim)
+
+        actual = _run_full_attention(q, k, v, mask)
+        expected = _attention_reference(
+            q.reshape(seq, dim),
+            k.reshape(seq, dim),
+            v.reshape(seq, dim),
+            scale,
+            mask.reshape(seq, seq),
+        ).reshape(1, 1, seq, dim)
+        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
+
+    def test_full_attention_small(self):
+        self._check_full_attention(seq=8, dim=64)
+
+    def test_full_attention_tiled(self):
+        self._check_full_attention(seq=32, dim=32)
+
+    def test_full_attention_padded_head_dim(self):
+        self._check_full_attention(seq=8, dim=20)
 
 
 if __name__ == "__main__":
