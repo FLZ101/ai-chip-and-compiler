@@ -17,10 +17,15 @@ struct SoftwareKernelRequest {
   std::vector<int64_t> paddings = {0, 0};
   std::vector<int64_t> dilations = {1, 1};
   bool has_bias = false;
+  double epsilon = 1e-5;
   int64_t input_offset = 0;
+  int64_t input2_offset = 0;
   int64_t weight_offset = 0;
   int64_t bias_offset = 0;
+  int64_t mean_offset = 0;
+  int64_t var_offset = 0;
   int64_t output_offset = 0;
+  std::vector<int64_t> kernel = {1, 1};
 };
 
 bool run_software_kernel(ByteMemory &memory, const SoftwareKernelRequest &request);

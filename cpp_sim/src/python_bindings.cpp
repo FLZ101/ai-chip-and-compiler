@@ -80,10 +80,26 @@ bool software_run(py::buffer global_buffer, const py::dict &request_dict) {
   request.paddings = to_i64_vector(request_dict["paddings"].cast<py::tuple>());
   request.dilations = to_i64_vector(request_dict["dilations"].cast<py::tuple>());
   request.has_bias = request_dict["has_bias"].cast<bool>();
+  request.epsilon = request_dict.contains("epsilon")
+                        ? request_dict["epsilon"].cast<double>()
+                        : 1e-5;
   request.input_offset = request_dict["input_offset"].cast<int64_t>();
+  request.input2_offset = request_dict.contains("input2_offset")
+                              ? request_dict["input2_offset"].cast<int64_t>()
+                              : 0;
   request.weight_offset = request_dict["weight_offset"].cast<int64_t>();
   request.bias_offset = request_dict["bias_offset"].cast<int64_t>();
+  request.mean_offset = request_dict.contains("mean_offset")
+                            ? request_dict["mean_offset"].cast<int64_t>()
+                            : 0;
+  request.var_offset = request_dict.contains("var_offset")
+                           ? request_dict["var_offset"].cast<int64_t>()
+                           : 0;
   request.output_offset = request_dict["output_offset"].cast<int64_t>();
+  request.kernel = to_i64_vector(
+      request_dict.contains("kernel")
+          ? request_dict["kernel"].cast<py::tuple>()
+          : py::make_tuple(1, 1));
 
   bool ok = cpp_sim::run_software_kernel(memory, request);
   std::memcpy(info.ptr, memory.bytes().data(), bytes.size());
