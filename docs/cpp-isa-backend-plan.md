@@ -1,5 +1,7 @@
 # C++ ISA Backend Plan: `mgpu-opt` MLIR Path
 
+Layout-aware backend details: [layout-aware-mgpu-plan.md](layout-aware-mgpu-plan.md).
+
 ## Goal
 
 Make `mgpu-opt` the canonical C++ backend for every operator.
@@ -20,8 +22,9 @@ C++ owns:
 - register/address generation,
 - ISA text emission.
 
-The Python `compiler/codegen/*` ISA emitters become fallback-only and are
-eventually removed.
+The Python `compiler/codegen/*` ISA emitters are temporary scaffolding.  They
+must be removed once `mgpu-opt` covers every supported operator and multi-node
+layout.
 
 ## Current state
 
@@ -35,8 +38,9 @@ eventually removed.
 - specialized C++ emitters for vector add, matmul, conv2d, and
   `mgpu.attention`.
 
-The Python operator E2E tests still call Python `compiler/codegen` directly,
-so they do not currently exercise the C++ path.
+The C++ path is canonical for standalone supported operators.  Python
+`compiler/codegen` still exists only for multi-node graphs and a few remaining
+edge cases.  The next cleanup step is to remove that fallback.
 
 ## Architecture
 
@@ -228,20 +232,20 @@ Exit criteria:
 
 ### Phase 8: Cut over and cleanup
 
-Status: **done**
+Status: **in progress**
 
 Deliverables:
 
 - Python `lower_kernel` calls `mgpu-opt`,
-- Python `compiler/codegen/*` emitters are frozen or removed,
+- Python `compiler/codegen/*` emitters are removed,
 - all existing E2E tests pass through C++,
 - update `docs/steps.md` and `docs/next-stage-plan.md`.
 
 Exit criteria:
 
-- the canonical single-node operator path emits ISA from `mgpu-opt`;
-- Python codegen remains as a fallback for multi-node graphs and unsupported
-  edge cases until the C++ backend is layout-aware.
+- no Python `compiler/codegen` ISA emitter remains in the canonical path;
+- multi-node graphs and unsupported edge cases either lower through
+  `mgpu-opt` or fail with an explicit diagnostic instead of falling back.
 
 ## Pass ownership
 
@@ -283,6 +287,6 @@ Add lit tests for each C++ pass:
 
 - Every current operator E2E test runs through `mgpu-opt`.
 - Every operator has a C++ lowering or a real linalg decomposition.
-- Python no longer emits ISA on the canonical path.
+- Python `compiler/codegen` no longer emits ISA on any path.
 - `mgpu-opt` is built by the existing build flow.
 - Docs reflect that `mgpu-opt` is the only ISA backend.
