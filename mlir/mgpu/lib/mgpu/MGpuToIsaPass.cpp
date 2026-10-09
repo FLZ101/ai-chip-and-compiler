@@ -629,33 +629,77 @@ struct MGpuToIsaPass
     int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
     std::string identity = (*opcode == "MAX") ? "-1.0e30" : "0";
 
+    // Single-block shared-memory tree reduction.  The block size is the next
+    // power of two large enough for ``n`` (and at least one full warp), so all
+    // inactive lanes can store the reduction identity and keep every BAR.SYNC
+    // convergent.  This mirrors CUDA's common intra-block reduction strategy.
+    int64_t blockSize = 32;
+    while (blockSize < n)
+      blockSize *= 2;
+
     std::string code;
     llvm::raw_string_ostream os(code);
+
+    // R0 = tid.x, R1 = bound/stride, R2 = predicate, R3 = byte offset,
+    // R4 = value/address, R5..R9 = load/reduce temporaries.
     os << "MOV R0, tid.x\n"
-       << "MOV R1, 0\n"
-       << "CMP.EQ R2, R0, R1\n"
-       << "BRA body, R2, end\n"
-       << "BRA end\n"
-       << "body:\n"
-       << "MOV R3, " << identity << "\n";
-    for (int64_t i = 0; i < n; ++i) {
-      os << "MOV R4, " << (inputBase + i * 4) << "\n"
-         << "LDG R5, [R4]\n"
-         << *opcode << " R3, R3, R5\n";
+       << "MUL R3, R0, 4\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA load, R2, load_end\n"
+       << "BRA load_end\n"
+       << "load:\n"
+       << "MOV R4, " << inputBase << "\n"
+       << "ADD R7, R3, R4\n"
+       << "LDG R5, [R7]\n"
+       << "MOV R4, R5\n"
+       << "BRA load_end\n"
+       << "load_skip:\n"
+       << "MOV R4, " << identity << "\n"
+       << "BRA load_end\n"
+       << "load_end:\n"
+       << "STS [R3], R4\n"
+       << "BAR.SYNC\n";
+
+    for (int64_t stride = blockSize / 2; stride > 0; stride /= 2) {
+      std::string body = "tree_" + std::to_string(stride) + "_body";
+      std::string end = "tree_" + std::to_string(stride) + "_end";
+      os << "MOV R1, " << stride << "\n"
+         << "CMP.LT R2, R0, R1\n"
+         << "BRA " << body << ", R2, " << end << "\n"
+         << "BRA " << end << "\n"
+         << body << ":\n"
+         << "MUL R5, R0, 4\n"
+         << "MOV R6, R0\n"
+         << "ADD R6, R6, R1\n"
+         << "MUL R6, R6, 4\n"
+         << "LDS R7, [R5]\n"
+         << "LDS R8, [R6]\n"
+         << *opcode << " R9, R7, R8\n"
+         << "STS [R5], R9\n"
+         << "BRA " << end << "\n"
+         << end << ":\n"
+         << "BAR.SYNC\n";
     }
+
+    os << "CMP.EQ R2, R0, 0\n"
+       << "BRA store, R2, store_end\n"
+       << "BRA store_end\n"
+       << "store:\n"
+       << "LDS R4, [R3]\n";
     if (divideByCount)
-      os << "DIV R3, R3, " << n << "\n";
-    os << "MOV R4, " << outputBase << "\n"
-       << "STG [R4], R3\n"
-       << "BRA end\n"
-       << "end:\n"
+      os << "DIV R4, R4, " << n << "\n";
+    os << "MOV R5, " << outputBase << "\n"
+       << "STG [R5], R4\n"
+       << "BRA store_end\n"
+       << "store_end:\n"
        << "EXIT\n";
     os.flush();
 
     IsaText isa;
     isa.code = code;
     isa.grid = "1x1x1";
-    isa.block = "32x1x1";
+    isa.block = std::to_string(blockSize) + "x1x1";
     return isa;
   }
 
@@ -2382,6 +2426,10 @@ struct MGpuToIsaPass
     Value outputValue;
     Value biasValue;
     bool hasBias = false;
+    int64_t padY = 0;
+    int64_t padX = 0;
+    int64_t strideY = 1;
+    int64_t strideX = 1;
 
     SmallVector<mgpu::Conv2DOp> customConvs;
     launch.getBody().front().walk(
@@ -2393,6 +2441,10 @@ struct MGpuToIsaPass
       outputValue = conv.getOutput();
       hasBias = conv.getHasBias();
       biasValue = hasBias ? conv.getBias() : imageValue;
+      padY = conv.getPadY();
+      padX = conv.getPadX();
+      strideY = conv.getStrideY();
+      strideX = conv.getStrideX();
     } else {
       SmallVector<linalg::Conv2DNchwFchwOp> convs;
       launch.getBody().front().walk(
@@ -2434,9 +2486,11 @@ struct MGpuToIsaPass
       return std::nullopt;
     int64_t spatialSize = oh * ow;
     int64_t reductionSize = c * kh * kw;
-    if (spatialSize > 16 || reductionSize > 16 || f > 16)
+    if (padY != 0 || padX != 0 || strideY != 1 || strideX != 1 ||
+        spatialSize > 16 || reductionSize > 16 || f > 16)
       return emitScalarConvIsa(imageValue, weightValue, outputValue, biasValue,
-                               hasBias, c, h, w, f, kh, kw, oh, ow);
+                               hasBias, c, h, w, f, kh, kw, oh, ow, padY, padX,
+                               strideY, strideX);
 
     int64_t imageBase = bufferMap.base(imageValue);
     int64_t weightBase = bufferMap.base(weightValue);
@@ -2505,7 +2559,8 @@ struct MGpuToIsaPass
   std::optional<IsaText> emitScalarConvIsa(
       Value imageValue, Value weightValue, Value outputValue, Value biasValue,
       bool hasBias, int64_t c, int64_t h, int64_t w, int64_t f, int64_t kh,
-      int64_t kw, int64_t oh, int64_t ow) {
+      int64_t kw, int64_t oh, int64_t ow, int64_t padY, int64_t padX,
+      int64_t strideY, int64_t strideX) {
     int64_t imageBase = bufferMap.base(imageValue);
     int64_t weightBase = bufferMap.base(weightValue);
     int64_t outputBase = bufferMap.base(outputValue);
@@ -2526,9 +2581,9 @@ struct MGpuToIsaPass
     for (int64_t ci = 0; ci < c; ++ci) {
       for (int64_t ky = 0; ky < kh; ++ky) {
         for (int64_t kx = 0; kx < kw; ++kx) {
-          int64_t ihConst = ky;
-          int64_t iwConst = kx;
-          os << "MOV R4, 1\n"
+          int64_t ihConst = ky - padY;
+          int64_t iwConst = kx - padX;
+          os << "MOV R4, " << strideY << "\n"
              << "MUL R4, R2, R4\n"
              << "ADD R4, R4, " << ihConst << "\n"
              << "CMP.GE R5, R4, 0\n"
@@ -2539,7 +2594,7 @@ struct MGpuToIsaPass
              << "MAX R10, R4, R9\n"
              << "MOV R9, " << (h - 1) << "\n"
              << "MIN R10, R10, R9\n"
-             << "MOV R11, 1\n"
+             << "MOV R11, " << strideX << "\n"
              << "MUL R11, R3, R11\n"
              << "ADD R11, R11, " << iwConst << "\n"
              << "CMP.GE R12, R11, 0\n"

@@ -1,6 +1,5 @@
-"""ISA code generation from the unified Model IR."""
+"""C++ ISA backend dispatcher."""
 
-from .common_kernels import lower_common_kernel
-from .dispatcher import lower_kernel
+from .dispatcher import lower_common_kernel, lower_kernel
 
 __all__ = ["lower_common_kernel", "lower_kernel"]

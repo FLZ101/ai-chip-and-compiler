@@ -2,7 +2,8 @@
 // CHECK: func.func @sum
 // CHECK: "mgpu.isa"()
 // CHECK-SAME: code = "MOV R0, tid.x
-// CHECK-SAME: ADD R3, R3, R5
+// CHECK-SAME: ADD R9, R7, R8
+// CHECK-SAME: BAR.SYNC
 
 module {
   func.func @sum(%arg0: memref<4xf32>) -> memref<f32> {

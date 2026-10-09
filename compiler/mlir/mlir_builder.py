@@ -513,29 +513,9 @@ class MLIRBuilder:
         output = node.outputs[0]
         padding = _pair(node.attrs.get("padding", 0), "padding")
         strides = _pair(node.attrs.get("strides", 1), "strides")
-        dilations = _pair(node.attrs.get("dilation", 1), "dilation")
         image_type = self._memref_type(image)
         weight_type = self._memref_type(weight)
         out_type = self._memref_type(output)
-        if padding != (0, 0):
-            scalar_type = self._scalar_type(output.dtype)
-            dims = ", ".join(f"d{axis}" for axis in range(output.rank))
-            input_map = f"affine_map<({dims}) -> (d0, 0, 0, 0)>"
-            identity = f"affine_map<({dims}) -> ({dims})>"
-            iterator_types = ", ".join('"parallel"' for _ in range(output.rank))
-            return [
-                f"{indent}// Conv padding is inserted by the tiling pass; "
-                "identity placeholder preserves the legacy E2E path.",
-                f"{indent}linalg.generic {{",
-                f"{indent}  indexing_maps = [{input_map}, {identity}],",
-                f"{indent}  iterator_types = [{iterator_types}]",
-                f"{indent}}} ins({self._value_names[image.name]} : "
-                f"{image_type}) outs({result_name} : {out_type}) {{",
-                f"{indent}^bb0(%in: {scalar_type}, %out: {scalar_type}):",
-                f"{indent}  linalg.yield %in : {scalar_type}",
-                f"{indent}}}",
-            ]
-
         bias_name = (
             self._value_names[node.inputs[2].name]
             if len(node.inputs) == 3
@@ -544,12 +524,15 @@ class MLIRBuilder:
         bias_type = (
             self._memref_type(node.inputs[2]) if len(node.inputs) == 3 else image_type
         )
-        attr_text = "hasBias" if len(node.inputs) == 3 else ""
-        attr_text = "{" + attr_text + "}" if attr_text else "{}"
+        attr_text = "{hasBias}" if len(node.inputs) == 3 else "{}"
+        pad_y, pad_x = padding
+        stride_y, stride_x = strides
         return [
             f"{indent}mgpu.conv2d {self._value_names[image.name]}, "
             f"{self._value_names[weight.name]}, {bias_name}, {result_name} "
-            f"{attr_text} : {image_type}, {weight_type}, {bias_type}, {out_type}"
+            f"padY = {pad_y}, padX = {pad_x}, strideY = {stride_y}, "
+            f"strideX = {stride_x} {attr_text} : {image_type}, {weight_type}, "
+            f"{bias_type}, {out_type}"
         ]
 
     def _emit_depthwise_conv2d(
