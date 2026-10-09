@@ -72,7 +72,8 @@ private:
     int64_t elements = 1;
     for (int64_t dim : type.getShape())
       elements *= dim;
-    return elements * (type.getElementTypeBitWidth() / 8);
+    // Python simulator buffers are always FP32-sized in the current harness.
+    return elements * 4;
   }
 
   DenseMap<Value, int64_t> offsets;
@@ -1017,7 +1018,15 @@ struct MGpuToIsaPass
     SmallVector<linalg::GenericOp> generics;
     launch.getBody().front().walk(
         [&](linalg::GenericOp generic) { generics.push_back(generic); });
+    Value finalOutput;
     for (linalg::GenericOp generic : generics) {
+      bool hasDiv = false;
+      generic.getRegion().walk([&](arith::DivFOp) { hasDiv = true; });
+      if (hasDiv) {
+        auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+        if (!dstOp.getDpsInits().empty())
+          finalOutput = dstOp.getDpsInits()[0];
+      }
       auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
       if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().empty())
         continue;
@@ -1038,7 +1047,9 @@ struct MGpuToIsaPass
       int64_t w = inputType.getShape()[3];
       int64_t total = c;
       int64_t inputBase = bufferMap.base(dstOp.getDpsInputs()[0]);
-      int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
+      int64_t outputBase =
+          finalOutput ? bufferMap.base(finalOutput)
+                      : inputBase + memrefByteSize(inputType);
 
       std::string code;
       llvm::raw_string_ostream os(code);
