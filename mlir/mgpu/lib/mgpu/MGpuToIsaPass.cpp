@@ -749,8 +749,13 @@ struct MGpuToIsaPass
       auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
       if (!inputType || !outputType)
         continue;
-      if (!inputType.getElementType().isF32() ||
-          !outputType.getElementType().isF32())
+      bool extfCase = inputType.getElementType().isF32() &&
+                      outputType.getElementType().isF64();
+      bool truncfCase = inputType.getElementType().isF64() &&
+                        outputType.getElementType().isF32();
+      if (!extfCase && !truncfCase &&
+          (!inputType.getElementType().isF32() ||
+           !outputType.getElementType().isF32()))
         continue;
       if (llvm::any_of(inputType.getShape(),
                        [](int64_t dim) { return ShapedType::isDynamic(dim); }) ||
@@ -771,6 +776,7 @@ struct MGpuToIsaPass
       bool hasDiv = false;
       bool hasAdd = false;
       bool hasTrunc = false;
+      bool hasExtf = false;
       generic.getRegion().walk([&](Operation *op) {
         if (isa<math::RsqrtOp>(op))
           hasRsqrt = true;
@@ -780,15 +786,20 @@ struct MGpuToIsaPass
           hasAdd = true;
         else if (isa<arith::TruncFOp>(op))
           hasTrunc = true;
+        else if (isa<arith::ExtFOp>(op))
+          hasExtf = true;
       });
 
-      if (!hasRsqrt && !hasDiv && !(hasAdd && hasTrunc))
+      if (!hasRsqrt && !hasDiv && !(hasAdd && hasTrunc) && !hasExtf &&
+          !(hasTrunc && truncfCase))
         continue;
 
       Value inputBlockArg = generic.getRegion().front().getArgument(0);
       std::string opcode;
       double constant = 0.0;
-      if (hasRsqrt) {
+      if (hasExtf || (hasTrunc && truncfCase)) {
+        opcode = "";
+      } else if (hasRsqrt) {
         opcode = "RSQRT";
       } else if (hasDiv) {
         opcode = "DIV";
@@ -828,19 +839,23 @@ struct MGpuToIsaPass
       int64_t total = outputElements;
       int64_t inputBase = bufferMap.base(dstOp.getDpsInputs()[0]);
       int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
+      int64_t inputStride = inputType.getElementType().isF64() ? 8 : 4;
+      int64_t outputStride = outputType.getElementType().isF64() ? 8 : 4;
 
       std::string code;
       llvm::raw_string_ostream os(code);
       emitCnnPrologue(os, total);
-      os << "MUL R3, R0, 4\n"
+      os << "MUL R3, R0, " << inputStride << "\n"
          << "ADD R3, R3, " << inputBase << "\n"
          << "LDG R5, [R3]\n";
-      if (opcode == "RSQRT") {
+      if (opcode.empty()) {
+        os << "MOV R6, R5\n";
+      } else if (opcode == "RSQRT") {
         os << "RSQRT R6, R5\n";
       } else {
         os << opcode << " R6, R5, " << constant << "\n";
       }
-      os << "MUL R4, R0, 4\n"
+      os << "MUL R4, R0, " << outputStride << "\n"
          << "ADD R4, R4, " << outputBase << "\n"
          << "STG [R4], R6\n";
       emitCnnFinish(os);
@@ -986,10 +1001,20 @@ struct MGpuToIsaPass
     generic.getRegion().walk([&](Operation *op) {
       if (isa<arith::AddFOp>(op))
         opcode = "ADD";
+      else if (isa<arith::AddIOp>(op))
+        opcode = "ADD";
       else if (isa<arith::SubFOp>(op))
+        opcode = "SUB";
+      else if (isa<arith::SubIOp>(op))
         opcode = "SUB";
       else if (isa<arith::MulFOp>(op))
         opcode = "MUL";
+      else if (isa<arith::MulIOp>(op))
+        opcode = "MUL";
+      else if (isa<arith::AndIOp>(op))
+        opcode = "MUL";
+      else if (isa<arith::OrIOp>(op))
+        opcode = "MAX";
       else if (isa<arith::DivFOp>(op))
         opcode = "DIV";
     });
@@ -1015,12 +1040,881 @@ struct MGpuToIsaPass
     return opcode;
   }
 
+  std::optional<IsaText>
+  emitConstantFillLinalgIsa(mgpu::LaunchOp launch,
+                            linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (!dstOp.getDpsInputs().empty() || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!outputType || outputType.getRank() != 1)
+      return std::nullopt;
+
+    Value yielded;
+    generic.getRegion().walk([&](linalg::YieldOp yieldOp) {
+      if (!yieldOp.getValues().empty())
+        yielded = yieldOp.getValues().front();
+    });
+    if (!yielded)
+      return std::nullopt;
+    auto constantOp = yielded.getDefiningOp<arith::ConstantOp>();
+    if (!constantOp)
+      return std::nullopt;
+
+    bool isInteger = false;
+    bool isFloat = false;
+    int64_t integerValue = 0;
+    double floatValue = 0.0;
+    if (auto intAttr = dyn_cast<IntegerAttr>(constantOp.getValue())) {
+      isInteger = true;
+      integerValue = intAttr.getInt();
+    } else if (auto floatAttr = dyn_cast<FloatAttr>(constantOp.getValue())) {
+      isFloat = true;
+      floatValue = floatAttr.getValueAsDouble();
+    } else {
+      return std::nullopt;
+    }
+
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!outputOffset)
+      return std::nullopt;
+    int64_t n = outputType.getShape()[0];
+    int64_t gridX = (n + 31) / 32;
+    int64_t stride = 4;
+    if (outputType.getElementType().isInteger())
+      stride =
+          cast<IntegerType>(outputType.getElementType()).getWidth() == 64 ? 8
+                                                                          : 4;
+    else
+      stride = elementStride(outputType.getElementType());
+    std::string storeOp =
+        outputType.getElementType().isInteger() &&
+                cast<IntegerType>(outputType.getElementType()).getWidth() == 64
+            ? "STG.I32"
+            : typedStoreOpcode(outputType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MUL R1, R0, " << stride << "\n"
+       << "ADD R1, R1, " << *outputOffset << "\n"
+       << storeOp << " [R1], ";
+    if (isInteger)
+      os << integerValue;
+    else
+      os << floatValue;
+    os << "\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText>
+  emitIntegerExtendLinalgIsa(mgpu::LaunchOp launch,
+                             linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!inputType || !outputType || !inputType.getElementType().isInteger(1) ||
+        !outputType.getElementType().isInteger(64))
+      return std::nullopt;
+
+    int64_t inputElements = 1;
+    int64_t outputElements = 1;
+    for (int64_t dim : inputType.getShape())
+      inputElements *= dim;
+    for (int64_t dim : outputType.getShape())
+      outputElements *= dim;
+    if (inputElements != outputElements)
+      return std::nullopt;
+
+    bool hasExt = false;
+    bool hasYield = false;
+    generic.getRegion().walk([&](Operation *op) {
+      if (isa<arith::ExtUIOp>(op) || isa<arith::ExtSIOp>(op))
+        hasExt = true;
+      if (isa<linalg::YieldOp>(op))
+        hasYield = true;
+    });
+    if (!hasExt || !hasYield)
+      return std::nullopt;
+
+    auto inputOffset = bufferMap.lookup(dstOp.getDpsInputs()[0]);
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!inputOffset || !outputOffset)
+      return std::nullopt;
+
+    int64_t n = outputElements;
+    int64_t gridX = (n + 31) / 32;
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "ADD R1, R0, " << *inputOffset << "\n"
+       << "LDG.I8 R2, [R1]\n"
+       << "MUL R3, R0, 8\n"
+       << "ADD R3, R3, " << *outputOffset << "\n"
+       << "STG.I32 [R3], R2\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText>
+  emitSelectLinalgIsa(mgpu::LaunchOp launch, linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 3 || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto maskType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto trueType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[1].getType());
+    auto falseType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[2].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!maskType || !trueType || !falseType || !outputType ||
+        !outputType.getElementType().isF32())
+      return std::nullopt;
+
+    bool hasSelect = false;
+    bool hasYield = false;
+    generic.getRegion().walk([&](Operation *op) {
+      if (isa<arith::SelectOp>(op))
+        hasSelect = true;
+      if (isa<linalg::YieldOp>(op))
+        hasYield = true;
+    });
+    if (!hasSelect || !hasYield)
+      return std::nullopt;
+
+    auto maskOffset = bufferMap.lookup(dstOp.getDpsInputs()[0]);
+    auto trueOffset = bufferMap.lookup(dstOp.getDpsInputs()[1]);
+    auto falseOffset = bufferMap.lookup(dstOp.getDpsInputs()[2]);
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!maskOffset || !trueOffset || !falseOffset || !outputOffset)
+      return std::nullopt;
+
+    int64_t n = 1;
+    for (int64_t dim : outputType.getShape())
+      n *= dim;
+    int64_t gridX = (n + 31) / 32;
+    std::string trueLoad = typedLoadOpcode(trueType);
+    std::string falseLoad = typedLoadOpcode(falseType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "ADD R1, R0, " << *maskOffset << "\n"
+       << "LDG.I8 R2, [R1]\n"
+       << trueLoad << " R3, [" << *trueOffset << "]\n"
+       << falseLoad << " R4, [" << *falseOffset << "]\n"
+       << "SEL R5, R2, R3, R4\n"
+       << "MUL R6, R0, 4\n"
+       << "ADD R6, R6, " << *outputOffset << "\n"
+       << "STG [R6], R5\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText>
+  emitFloatConstantDivLinalgIsa(mgpu::LaunchOp launch,
+                                linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!inputType || !outputType || !inputType.getElementType().isF64() ||
+        !outputType.getElementType().isF64())
+      return std::nullopt;
+
+    Value inputBlockArg = generic.getRegion().front().getArgument(0);
+    double constant = 0.0;
+    bool found = false;
+    generic.getRegion().walk([&](Operation *op) {
+      if (auto divOp = dyn_cast<arith::DivFOp>(op)) {
+        if (divOp.getLhs() != inputBlockArg)
+          return;
+        auto constantOp = divOp.getRhs().getDefiningOp<arith::ConstantOp>();
+        if (!constantOp)
+          return;
+        auto floatAttr = dyn_cast<FloatAttr>(constantOp.getValue());
+        if (!floatAttr)
+          return;
+        constant = floatAttr.getValueAsDouble();
+        found = true;
+      }
+    });
+    if (!found)
+      return std::nullopt;
+
+    auto inputOffset = bufferMap.lookup(dstOp.getDpsInputs()[0]);
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!inputOffset || !outputOffset)
+      return std::nullopt;
+
+    int64_t n = 1;
+    for (int64_t dim : outputType.getShape())
+      n *= dim;
+    int64_t stride = 8;
+    int64_t gridX = (n + 31) / 32;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MUL R1, R0, " << stride << "\n"
+       << "ADD R1, R1, " << *inputOffset << "\n"
+       << "LDG R2, [R1]\n"
+       << "DIV R3, R2, " << constant << "\n"
+       << "MUL R4, R0, " << stride << "\n"
+       << "ADD R4, R4, " << *outputOffset << "\n"
+       << "STG [R4], R3\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText>
+  emitLastDimReductionLinalgIsa(mgpu::LaunchOp launch,
+                                linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!inputType || !outputType || inputType.getRank() != 3 ||
+        outputType.getRank() != 3)
+      return std::nullopt;
+    if (outputType.getShape()[2] != 1 ||
+        inputType.getShape()[0] != outputType.getShape()[0] ||
+        inputType.getShape()[1] != outputType.getShape()[1])
+      return std::nullopt;
+
+    std::string opcode;
+    generic.getRegion().walk([&](Operation *op) {
+      if (isa<arith::AddFOp>(op) || isa<arith::AddIOp>(op))
+        opcode = "ADD";
+      else if (isa<arith::MaximumFOp>(op))
+        opcode = "MAX";
+    });
+    if (opcode.empty())
+      return std::nullopt;
+
+    auto inputOffset = bufferMap.lookup(dstOp.getDpsInputs()[0]);
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!inputOffset || !outputOffset)
+      return std::nullopt;
+
+    int64_t d0 = inputType.getShape()[0];
+    int64_t d1 = inputType.getShape()[1];
+    int64_t d2 = inputType.getShape()[2];
+    int64_t totalOut = d0 * d1;
+    int64_t gridX = (totalOut + 31) / 32;
+    int64_t inputStride = elementStride(inputType.getElementType());
+    int64_t outputStride = elementStride(outputType.getElementType());
+    std::string loadOp = typedLoadOpcode(inputType);
+    std::string storeOp = typedStoreOpcode(outputType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << totalOut << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MOV R4, 0\n"
+       << "MOV R5, 0\n"
+       << "MOV R6, " << d2 << "\n"
+       << "reduce_loop:\n"
+       << "CMP.LT R7, R5, R6\n"
+       << "BRA reduce_body, R7, reduce_end\n"
+       << "BRA reduce_end\n"
+       << "reduce_body:\n"
+       << "MUL R8, R0, " << d2 << "\n"
+       << "ADD R8, R8, R5\n"
+       << "MUL R8, R8, " << inputStride << "\n"
+       << "ADD R8, R8, " << *inputOffset << "\n"
+       << loadOp << " R9, [R8]\n"
+       << opcode << " R4, R4, R9\n"
+       << "ADD R5, R5, 1\n"
+       << "BRA reduce_loop\n"
+       << "reduce_end:\n"
+       << "MUL R10, R0, " << outputStride << "\n"
+       << "ADD R10, R10, " << *outputOffset << "\n"
+       << storeOp << " [R10], R4\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText>
+  emitIntegerBinaryCompareLinalgIsa(mgpu::LaunchOp launch,
+                                    linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 2 || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto leftType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto rightType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[1].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!leftType || !rightType || !outputType ||
+        !leftType.getElementType().isInteger() ||
+        !rightType.getElementType().isInteger() ||
+        !outputType.getElementType().isInteger(1))
+      return std::nullopt;
+
+    int64_t n = 1;
+    for (int64_t dim : outputType.getShape())
+      n *= dim;
+
+    Value leftArg = generic.getRegion().front().getArgument(0);
+    Value rightArg = generic.getRegion().front().getArgument(1);
+    std::string opcode;
+    generic.getRegion().walk([&](Operation *op) {
+      if (auto cmpOp = dyn_cast<arith::CmpIOp>(op)) {
+        if (cmpOp.getLhs() != leftArg || cmpOp.getRhs() != rightArg)
+          return;
+        switch (cmpOp.getPredicate()) {
+        case arith::CmpIPredicate::eq:
+          opcode = "CMP.EQ";
+          break;
+        case arith::CmpIPredicate::ne:
+          opcode = "CMP.NE";
+          break;
+        case arith::CmpIPredicate::slt:
+          opcode = "CMP.LT";
+          break;
+        case arith::CmpIPredicate::sle:
+          opcode = "CMP.LE";
+          break;
+        case arith::CmpIPredicate::sgt:
+          opcode = "CMP.GT";
+          break;
+        case arith::CmpIPredicate::sge:
+          opcode = "CMP.GE";
+          break;
+        default:
+          break;
+        }
+      }
+    });
+    if (opcode.empty())
+      return std::nullopt;
+
+    auto leftOffset = bufferMap.lookup(dstOp.getDpsInputs()[0]);
+    auto rightOffset = bufferMap.lookup(dstOp.getDpsInputs()[1]);
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!leftOffset || !rightOffset || !outputOffset)
+      return std::nullopt;
+
+    int64_t leftStride =
+        cast<IntegerType>(leftType.getElementType()).getWidth() == 64 ? 8 : 4;
+    int64_t rightStride =
+        cast<IntegerType>(rightType.getElementType()).getWidth() == 64 ? 8 : 4;
+    int64_t outputStride = 1;
+    int64_t gridX = (n + 31) / 32;
+    std::string leftLoad =
+        cast<IntegerType>(leftType.getElementType()).getWidth() == 64
+            ? "LDG.I32"
+            : typedLoadOpcode(leftType);
+    std::string rightLoad =
+        cast<IntegerType>(rightType.getElementType()).getWidth() == 64
+            ? "LDG.I32"
+            : typedLoadOpcode(rightType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MUL R1, R0, " << leftStride << "\n"
+       << "ADD R1, R1, " << *leftOffset << "\n"
+       << leftLoad << " R2, [R1]\n"
+       << "MUL R3, R0, " << rightStride << "\n"
+       << "ADD R3, R3, " << *rightOffset << "\n"
+       << rightLoad << " R4, [R3]\n"
+       << opcode << " R5, R2, R4\n"
+       << "ADD R6, R0, " << *outputOffset << "\n"
+       << "STG.I8 [R6], R5\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText>
+  emitIntegerCompareLinalgIsa(mgpu::LaunchOp launch,
+                              linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!inputType || !outputType || !inputType.getElementType().isInteger() ||
+        !outputType.getElementType().isInteger(1))
+      return std::nullopt;
+
+    int64_t inputElements = 1;
+    int64_t outputElements = 1;
+    for (int64_t dim : inputType.getShape())
+      inputElements *= dim;
+    for (int64_t dim : outputType.getShape())
+      outputElements *= dim;
+    if (inputElements != outputElements)
+      return std::nullopt;
+
+    Value inputBlockArg = generic.getRegion().front().getArgument(0);
+    std::string opcode;
+    int64_t constant = 0;
+    generic.getRegion().walk([&](Operation *op) {
+      if (auto cmpOp = dyn_cast<arith::CmpIOp>(op)) {
+        if (cmpOp.getLhs() != inputBlockArg)
+          return;
+        auto constantOp = cmpOp.getRhs().getDefiningOp<arith::ConstantOp>();
+        if (!constantOp)
+          return;
+        auto intAttr = dyn_cast<IntegerAttr>(constantOp.getValue());
+        if (!intAttr)
+          return;
+        constant = intAttr.getInt();
+        switch (cmpOp.getPredicate()) {
+        case arith::CmpIPredicate::eq:
+          opcode = "CMP.EQ";
+          break;
+        case arith::CmpIPredicate::ne:
+          opcode = "CMP.NE";
+          break;
+        case arith::CmpIPredicate::slt:
+          opcode = "CMP.LT";
+          break;
+        case arith::CmpIPredicate::sle:
+          opcode = "CMP.LE";
+          break;
+        case arith::CmpIPredicate::sgt:
+          opcode = "CMP.GT";
+          break;
+        case arith::CmpIPredicate::sge:
+          opcode = "CMP.GE";
+          break;
+        default:
+          break;
+        }
+      }
+    });
+    if (opcode.empty())
+      return std::nullopt;
+
+    auto inputOffset = bufferMap.lookup(dstOp.getDpsInputs()[0]);
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!inputOffset || !outputOffset)
+      return std::nullopt;
+
+    int64_t inputStride =
+        cast<IntegerType>(inputType.getElementType()).getWidth() == 64 ? 8 : 4;
+    int64_t outputStride = 1;
+    int64_t n = outputElements;
+    int64_t gridX = (n + 31) / 32;
+    std::string loadOp =
+        cast<IntegerType>(inputType.getElementType()).getWidth() == 64
+            ? "LDG.I32"
+            : typedLoadOpcode(inputType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MUL R1, R0, " << inputStride << "\n"
+       << "ADD R1, R1, " << *inputOffset << "\n"
+       << loadOp << " R2, [R1]\n"
+       << opcode << " R3, R2, " << constant << "\n"
+       << "MUL R4, R0, " << outputStride << "\n"
+       << "ADD R4, R4, " << *outputOffset << "\n"
+       << "STG.I8 [R4], R3\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText>
+  emitIntegerConstantLinalgIsa(mgpu::LaunchOp launch,
+                               linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto inputType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!inputType || !outputType || !inputType.getElementType().isInteger() ||
+        !outputType.getElementType().isInteger())
+      return std::nullopt;
+
+    int64_t inputElements = 1;
+    int64_t outputElements = 1;
+    for (int64_t dim : inputType.getShape())
+      inputElements *= dim;
+    for (int64_t dim : outputType.getShape())
+      outputElements *= dim;
+    if (inputElements != outputElements)
+      return std::nullopt;
+
+    Value inputBlockArg = generic.getRegion().front().getArgument(0);
+    std::string opcode;
+    int64_t constant = 0;
+    generic.getRegion().walk([&](Operation *op) {
+      if (auto subOp = dyn_cast<arith::SubIOp>(op)) {
+        if (subOp.getLhs() == inputBlockArg) {
+          if (auto constantOp =
+                  subOp.getRhs().getDefiningOp<arith::ConstantOp>()) {
+            if (auto intAttr = dyn_cast<IntegerAttr>(constantOp.getValue())) {
+              opcode = "SUB";
+              constant = intAttr.getInt();
+            }
+          }
+        }
+      } else if (auto addOp = dyn_cast<arith::AddIOp>(op)) {
+        if (addOp.getLhs() == inputBlockArg) {
+          if (auto constantOp =
+                  addOp.getRhs().getDefiningOp<arith::ConstantOp>()) {
+            if (auto intAttr = dyn_cast<IntegerAttr>(constantOp.getValue())) {
+              opcode = "ADD";
+              constant = intAttr.getInt();
+            }
+          }
+        }
+      }
+    });
+    if (opcode.empty())
+      return std::nullopt;
+
+    auto inputOffset = bufferMap.lookup(dstOp.getDpsInputs()[0]);
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!inputOffset || !outputOffset)
+      return std::nullopt;
+
+    int64_t inputStride =
+        cast<IntegerType>(inputType.getElementType()).getWidth() == 64 ? 8 : 4;
+    int64_t outputStride =
+        cast<IntegerType>(outputType.getElementType()).getWidth() == 64 ? 8 : 4;
+    int64_t n = outputElements;
+    int64_t gridX = (n + 31) / 32;
+    std::string loadOp =
+        cast<IntegerType>(inputType.getElementType()).getWidth() == 64
+            ? "LDG.I32"
+            : typedLoadOpcode(inputType);
+    std::string storeOp =
+        cast<IntegerType>(outputType.getElementType()).getWidth() == 64
+            ? "STG.I32"
+            : typedStoreOpcode(outputType);
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MUL R1, R0, " << inputStride << "\n"
+       << "ADD R1, R1, " << *inputOffset << "\n"
+       << loadOp << " R2, [R1]\n"
+       << opcode << " R3, R2, " << constant << "\n"
+       << "MUL R4, R0, " << outputStride << "\n"
+       << "ADD R4, R4, " << *outputOffset << "\n"
+       << storeOp << " [R4], R3\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitIndexFillLinalgIsa(mgpu::LaunchOp launch,
+                                                linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (!dstOp.getDpsInputs().empty() || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!outputType || outputType.getRank() != 1 ||
+        !outputType.getElementType().isInteger())
+      return std::nullopt;
+
+    bool hasIndex = false;
+    bool hasIndexCast = false;
+    bool hasYield = false;
+    generic.getRegion().walk([&](Operation *op) {
+      if (isa<linalg::IndexOp>(op))
+        hasIndex = true;
+      if (isa<arith::IndexCastOp>(op))
+        hasIndexCast = true;
+      if (isa<linalg::YieldOp>(op))
+        hasYield = true;
+    });
+    if (!hasIndex || !hasIndexCast || !hasYield)
+      return std::nullopt;
+
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!outputOffset)
+      return std::nullopt;
+    int64_t outputBase = *outputOffset;
+    int64_t n = outputType.getShape()[0];
+    int64_t stride =
+        cast<IntegerType>(outputType.getElementType()).getWidth() == 64 ? 8 : 4;
+    int64_t gridX = (n + 31) / 32;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << n << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MUL R1, R0, " << stride << "\n"
+       << "ADD R1, R1, " << outputBase << "\n"
+       << "STG.I32 [R1], R0\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText>
+  emitEmbeddingGatherLinalgIsa(mgpu::LaunchOp launch,
+                               linalg::GenericOp generic) {
+    auto dstOp = cast<DestinationStyleOpInterface>(generic.getOperation());
+    if (dstOp.getDpsInputs().size() != 1 || dstOp.getDpsInits().size() != 1)
+      return std::nullopt;
+
+    auto indicesType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
+    if (!indicesType || !outputType)
+      return std::nullopt;
+    if (!indicesType.getElementType().isInteger())
+      return std::nullopt;
+    if (outputType.getRank() != indicesType.getRank() + 1)
+      return std::nullopt;
+
+    int64_t hiddenDim = outputType.getRank() - 1;
+    bool hasIndexCast = false;
+    bool hasLinalgIndex = false;
+    bool hasAssert = false;
+    bool hasYield = false;
+    Value weightValue;
+    generic.getRegion().walk([&](Operation *op) {
+      if (isa<arith::IndexCastOp>(op))
+        hasIndexCast = true;
+      if (auto indexOp = dyn_cast<linalg::IndexOp>(op)) {
+        if (indexOp.getDim() == static_cast<unsigned>(hiddenDim))
+          hasLinalgIndex = true;
+      }
+      if (auto loadOp = dyn_cast<memref::LoadOp>(op))
+        weightValue = loadOp.getMemref();
+      if (op->getName().getStringRef() == "cf.assert")
+        hasAssert = true;
+      if (isa<linalg::YieldOp>(op))
+        hasYield = true;
+    });
+    if (!hasIndexCast || !hasLinalgIndex || !hasAssert || !hasYield ||
+        !weightValue)
+      return std::nullopt;
+
+    auto weightType = dyn_cast<MemRefType>(weightValue.getType());
+    if (!weightType || !weightType.getElementType().isF32())
+      return std::nullopt;
+
+    int64_t inputElements = 1;
+    for (int64_t dim : indicesType.getShape())
+      inputElements *= dim;
+    int64_t hidden = outputType.getShape()[hiddenDim];
+    int64_t total = inputElements * hidden;
+    int64_t indicesStride =
+        cast<IntegerType>(indicesType.getElementType()).getWidth() == 64 ? 8 : 4;
+    int64_t weightStride = 4;
+    int64_t outputStride = 4;
+    auto indicesOffset = bufferMap.lookup(dstOp.getDpsInputs()[0]);
+    auto weightOffset = bufferMap.lookup(weightValue);
+    auto outputOffset = bufferMap.lookup(dstOp.getDpsInits()[0]);
+    if (!indicesOffset || !weightOffset || !outputOffset)
+      return std::nullopt;
+    int64_t indicesBase = *indicesOffset;
+    int64_t weightBase = *weightOffset;
+    int64_t outputBase = *outputOffset;
+    int64_t gridX = (total + 31) / 32;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
+       << "MOV R1, " << total << "\n"
+       << "CMP.LT R2, R0, R1\n"
+       << "BRA body, R2, end\n"
+       << "BRA end\n"
+       << "body:\n"
+       << "MOV R1, " << hidden << "\n"
+       << "IDIV R2, R0, R1\n"
+       << "MUL R3, R2, R1\n"
+       << "SUB R4, R0, R3\n"
+       << "MUL R5, R2, " << indicesStride << "\n"
+       << "ADD R5, R5, " << indicesBase << "\n"
+       << "LDG.I32 R6, [R5]\n"
+       << "MUL R7, R6, " << hidden << "\n"
+       << "ADD R7, R7, R4\n"
+       << "MUL R7, R7, " << weightStride << "\n"
+       << "ADD R7, R7, " << weightBase << "\n"
+       << "LDG R8, [R7]\n"
+       << "MUL R9, R0, " << outputStride << "\n"
+       << "ADD R9, R9, " << outputBase << "\n"
+       << "STG [R9], R8\n"
+       << "BRA end\n"
+       << "end:\n"
+       << "EXIT\n";
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string(gridX) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
   std::optional<IsaText> emitLinalgGenericIsa(mgpu::LaunchOp launch) {
     SmallVector<linalg::GenericOp> generics;
     launch.getBody().front().walk(
         [&](linalg::GenericOp generic) { generics.push_back(generic); });
 
     for (linalg::GenericOp generic : generics) {
+      if (auto isa = emitSelectLinalgIsa(launch, generic))
+        return isa;
+      if (auto isa = emitFloatConstantDivLinalgIsa(launch, generic))
+        return isa;
+      if (auto isa = emitLastDimReductionLinalgIsa(launch, generic))
+        return isa;
+      if (auto isa = emitConstantFillLinalgIsa(launch, generic))
+        return isa;
+      if (auto isa = emitIntegerBinaryCompareLinalgIsa(launch, generic))
+        return isa;
+      if (auto isa = emitIntegerExtendLinalgIsa(launch, generic))
+        return isa;
+      if (auto isa = emitIntegerCompareLinalgIsa(launch, generic))
+        return isa;
+      if (auto isa = emitIntegerConstantLinalgIsa(launch, generic))
+        return isa;
+      if (auto isa = emitIndexFillLinalgIsa(launch, generic))
+        return isa;
+      if (auto isa = emitEmbeddingGatherLinalgIsa(launch, generic))
+        return isa;
       if (auto isa = emitBinaryGenericIsa(launch, generic))
         return isa;
       if (auto isa = emitReductionGenericIsa(launch, generic))
@@ -1039,24 +1933,50 @@ struct MGpuToIsaPass
     if (!opcode)
       return std::nullopt;
 
+    auto leftType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[0].getType());
+    auto rightType = dyn_cast<MemRefType>(dstOp.getDpsInputs()[1].getType());
     auto outputType = dyn_cast<MemRefType>(dstOp.getDpsInits()[0].getType());
-    if (!outputType || outputType.getRank() != 1)
+    if (!leftType || !rightType || !outputType)
       return std::nullopt;
 
-    int64_t n = outputType.getShape()[0];
+    int64_t n = 1;
+    for (int64_t dim : outputType.getShape())
+      n *= dim;
     int64_t blockSize = 32;
     int64_t gridX = (n + blockSize - 1) / blockSize;
     int64_t leftBase = bufferMap.base(dstOp.getDpsInputs()[0]);
     int64_t rightBase = bufferMap.base(dstOp.getDpsInputs()[1]);
     int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
-    int64_t leftDelta = rightBase - leftBase;
-    int64_t outputDelta = outputBase - leftBase;
+    int64_t leftStride =
+        leftType.getRank() == 0 ? 0 : elementStride(leftType.getElementType());
+    int64_t rightStride =
+        rightType.getRank() == 0 ? 0 : elementStride(rightType.getElementType());
+    int64_t outputStride =
+        outputType.getRank() == 0 ? 0
+                                  : elementStride(outputType.getElementType());
+    auto integerLoadOpcode = [&](MemRefType type) -> std::string {
+      if (type.getElementType().isInteger() &&
+          cast<IntegerType>(type.getElementType()).getWidth() == 64)
+        return "LDG.I32";
+      return typedLoadOpcode(type);
+    };
+    auto integerStoreOpcode = [&](MemRefType type) -> std::string {
+      if (type.getElementType().isInteger() &&
+          cast<IntegerType>(type.getElementType()).getWidth() == 64)
+        return "STG.I32";
+      return typedStoreOpcode(type);
+    };
+    std::string leftLoad = integerLoadOpcode(leftType);
+    std::string rightLoad = integerLoadOpcode(rightType);
+    std::string outputStore = integerStoreOpcode(outputType);
 
     VirtualRegisterAllocator regs;
     int tid = regs.acquire();
     int limit = regs.acquire();
     int pred = regs.acquire();
-    int addr = regs.acquire();
+    int leftAddr = regs.acquire();
+    int rightAddr = regs.acquire();
+    int outputAddr = regs.acquire();
     int left = regs.acquire();
     int right = regs.acquire();
     int result = regs.acquire();
@@ -1072,15 +1992,25 @@ struct MGpuToIsaPass
        << "BRA body, " << regs.name(pred) << ", end\n"
        << "BRA end\n"
        << "body:\n"
-       << "MUL " << regs.name(addr) << ", " << regs.name(tid) << ", 4\n"
-       << "ADD " << regs.name(addr) << ", " << regs.name(addr) << ", "
+       << "MUL " << regs.name(leftAddr) << ", " << regs.name(tid) << ", "
+       << leftStride << "\n"
+       << "ADD " << regs.name(leftAddr) << ", " << regs.name(leftAddr) << ", "
        << leftBase << "\n"
-       << "LDG " << regs.name(left) << ", [" << regs.name(addr) << "]\n"
-       << "LDG " << regs.name(right) << ", [" << regs.name(addr) << " + "
-       << leftDelta << "]\n"
+       << leftLoad << " " << regs.name(left) << ", [" << regs.name(leftAddr)
+       << "]\n"
+       << "MUL " << regs.name(rightAddr) << ", " << regs.name(tid) << ", "
+       << rightStride << "\n"
+       << "ADD " << regs.name(rightAddr) << ", " << regs.name(rightAddr) << ", "
+       << rightBase << "\n"
+       << rightLoad << " " << regs.name(right) << ", [" << regs.name(rightAddr)
+       << "]\n"
        << *opcode << " " << regs.name(result) << ", " << regs.name(left) << ", "
        << regs.name(right) << "\n"
-       << "STG [" << regs.name(addr) << " + " << outputDelta << "], "
+       << "MUL " << regs.name(outputAddr) << ", " << regs.name(tid) << ", "
+       << outputStride << "\n"
+       << "ADD " << regs.name(outputAddr) << ", " << regs.name(outputAddr) << ", "
+       << outputBase << "\n"
+       << outputStore << " [" << regs.name(outputAddr) << "], "
        << regs.name(result) << "\n"
        << "BRA end\n"
        << "end:\n"
@@ -5403,6 +6333,8 @@ struct MGpuToIsaPass
   static std::string _typedOpcode(StringRef prefix, Type elementType) {
     if (elementType.isF32())
       return prefix.str();
+    if (elementType.isF64())
+      return prefix.str();
     if (elementType.isF16())
       return (prefix + ".F16").str();
     if (elementType.isBF16())
@@ -5414,11 +6346,15 @@ struct MGpuToIsaPass
     if (auto intType = dyn_cast<IntegerType>(elementType)) {
       if (intType.isUnsigned())
         return (prefix + (intType.getWidth() == 4 ? ".U4" : ".U8")).str();
+      if (intType.getWidth() == 1)
+        return (prefix + ".I8").str();
       if (intType.getWidth() == 4)
         return (prefix + ".I4").str();
       if (intType.getWidth() == 8)
         return (prefix + ".I8").str();
       if (intType.getWidth() == 32)
+        return (prefix + ".I32").str();
+      if (intType.getWidth() == 64)
         return (prefix + ".I32").str();
     }
     llvm::report_fatal_error("mgpu-to-isa: unsupported quant element type");
