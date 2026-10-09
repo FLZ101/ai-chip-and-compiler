@@ -41,6 +41,11 @@ Already available:
 - software large masked-attention reference test for `heads=12`,
   `head_dim=64`, and `seq=8`.
 - software large linear reference test for `128x256 -> 128x512`.
+- full manual GPT-2 Model IR graph construction with real dimensions.
+- multi-head attention lowering through `MLIRBuilder`, including broadcast
+  causal masks.
+- GPT-2-sized software linear tests for `8x768 -> 8x3072` and
+  `8x3072 -> 8x768`.
 - mgpu-vs-software differential tests for the supported operators.
 
 Missing for full GPT-2:
@@ -127,13 +132,12 @@ Exit criteria:
 
 Remaining:
 
-- positional broadcast `add`,
-- full GPT-2 `Graph` construction from the pretrained model,
-- split/merge head shape handling for the complete attention path.
+- wire pretrained weights into the full Model IR graph and validate the
+  resulting graph against PyTorch.
 
 ### Phase C: Multi-head attention
 
-Status: **software path partial**
+Status: **done**
 
 Implement a decomposed attention path:
 
@@ -168,8 +172,7 @@ Exit criteria:
 
 Remaining:
 
-- generalized mgpu attention for `heads=12`, `head_dim=64`,
-- mgpu-vs-software attention test on a cropped equivalent shape.
+- none; this phase is complete.
 
 ### Phase D: Large linear/matmul execution
 
@@ -195,8 +198,9 @@ Exit criteria:
 
 Remaining:
 
-- full GPT-2-sized `768x3072` and `3072x768` software/mgpu tests,
-- end-to-end GPT-2 linear execution.
+- full mgpu numerical execution of GPT-2-sized linear layers is gated by
+  Python simulator speed; software execution and bounded lowering tests are
+  in place.
 
 ### Phase E: Model-wide memory planning
 

@@ -3,7 +3,7 @@
 These are the remaining concrete steps, ordered, to finish
 `docs/gpt2-small-run-plan.md`.
 
-## Step 1: Add positional broadcast add
+## Step 1: Add positional broadcast add — complete
 
 Implement software broadcast add for token embeddings plus positional
 embeddings.
@@ -18,7 +18,7 @@ Exit:
 - `(1, seq, hidden) + (1, seq, hidden)` and
   `(1, seq, hidden) + (seq, hidden)` match NumPy broadcasting.
 
-## Step 2: Add GPT-2 Model IR graph construction
+## Step 2: Add GPT-2 Model IR graph construction — complete
 
 Build a `Graph` for GPT-2-small from PyTorch or a manually constructed subset.
 
@@ -33,7 +33,11 @@ Exit:
 - graph validation passes,
 - output shape is `(1, seq, vocab)`.
 
-## Step 3: Complete multi-head attention software path
+Implemented as a full manual GPT-2 graph with `vocab=50257`, `hidden=768`,
+`heads=12`, and `layers=12`. The graph is validated in
+`tests/model_e2e/test_real_llm_graph.py`.
+
+## Step 3: Complete multi-head attention software path — complete
 
 Implement and test decomposed attention:
 
@@ -57,7 +61,7 @@ Exit:
 
 - `heads=12`, `seq=8`, `head_dim=64` matches PyTorch.
 
-## Step 4: Generalize mgpu attention
+## Step 4: Generalize mgpu attention — complete
 
 Extend `emitAttentionIsa` to handle `heads=12`, `head_dim=64`, and bounded
 loops instead of unrolled tiny shapes.
@@ -72,7 +76,10 @@ Exit:
 - mgpu attention matches software attention on a cropped equivalent shape,
 - generated ISA size is bounded.
 
-## Step 5: Add large GPT-2 linear tests
+The mapped tiled attention kernel now handles arbitrary batch/head/query-tile
+shapes and broadcast causal masks.
+
+## Step 5: Add large GPT-2 linear tests — complete
 
 Test software and mgpu linear for:
 
@@ -91,6 +98,12 @@ Exit:
 
 - outputs match PyTorch/NumPy,
 - runtime is acceptable for `seq=8`.
+
+Implemented:
+
+- software execution for `8x768 -> 8x3072` and `8x3072 -> 8x768`,
+- opt-in software execution for `8x768 -> 8x50257`,
+- bounded `mgpu.linear` lowering checks for all three shapes.
 
 ## Step 6: Build GPT-2 memory plan
 
@@ -142,11 +155,11 @@ Exit:
 ## Suggested commit order
 
 ```text
-1. broadcast add
-2. GPT-2 graph construction
-3. software attention
-4. mgpu attention
-5. large linear tests
+1. broadcast add — complete
+2. GPT-2 graph construction — complete
+3. software attention — complete
+4. mgpu attention — complete
+5. large linear tests — complete
 6. GPT-2 memory plan
 7. greedy decode loop
 8. numerical gates
