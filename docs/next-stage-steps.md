@@ -692,6 +692,8 @@ Before real models can run, extend the simulator configuration:
 - register-file size control,
 - memory allocator for model weights, activations, and KV-cache.
 
+Detailed plan: [hardware-scaling-plan.md](hardware-scaling-plan.md)
+
 ---
 
 ## Phase 7: Runtime and Hardening
