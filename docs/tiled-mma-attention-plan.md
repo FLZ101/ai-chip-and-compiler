@@ -30,7 +30,7 @@ shapes.
 
 ## 2. Current status
 
-Phases 1 through 5 are implemented and tested:
+All phases are implemented and tested:
 
 - Phase 1: reusable fragment staging helpers.
 - Phase 2: tiled Q @ K^T score loops over query, key, and head-dimension
@@ -38,11 +38,10 @@ Phases 1 through 5 are implemented and tested:
 - Phase 3: two-pass tiled softmax with explicit causal masking.
 - Phase 4: tiled value accumulation and global output writes.
 - Phase 5: batch/head/query-tile block mapping.
+- Phase 6: differential, numerical, and final lit coverage.
 
 The original small-shape path still handles `seq <= 16` and `head_dim <= 16`.
-Large rank-4 attention still falls back to `emitScalarAttentionIsa` by
-default. The full tiled path is available under
-`--mgpu-emit-attention-tiled` and becomes the default in a later phase.
+Rank-4 attention now uses the mapped tiled kernel by default.
 
 ## 3. Design
 
@@ -230,23 +229,27 @@ The mapped kernel decodes `ctaid.x` into `(batch, head, query_tile)`, computes
 per-batch/head buffer bases once, and stores only the score tiles owned by
 that query tile.
 
-### Phase 6: Differential and lit tests
+### Phase 6: Differential and lit tests — complete
 
 Add:
 
 - mgpu-vs-software attention differential test,
-- mgpu-vs-PyTorch attention test,
+- mgpu-vs-NumPy reference attention tests,
 - FileCheck test ensuring `MMA`, loops, and `BAR.SYNC`.
 
 Files:
 
 - `tests/operator_e2e/test_attention_kernels_e2e.py`
 - `tests/operator_e2e/test_software_kernels_e2e.py`
-- `tests/mlir/mgpu_to_isa_attention.mlir`
+- `tests/operator_e2e/test_tiled_attention_kernels_e2e.py`
+- `tests/mlir/mgpu_to_isa_attention_tiled_full.mlir`
+- `tests/mlir/mgpu_to_isa_attention_mapped.mlir`
 
 Exit:
 
-- all attention tests pass,
+- `mgpu.attention` matches the software model,
+- tiled attention matches NumPy for small, padded, tiled, and multi-block
+  shapes,
 - pre-commit, unittest, and lit are green.
 
 ## 5. Suggested commit order
@@ -257,7 +260,7 @@ Exit:
 3. causal masking and softmax — complete
 4. tiled value accumulation — complete
 5. loop and grid mapping — complete
-6. differential and lit tests
+6. differential and lit tests — complete
 ```
 
 ## 6. Risks
