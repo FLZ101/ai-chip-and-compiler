@@ -232,6 +232,26 @@ class TorchFXFrontend:
                 dilation=module.dilation,
                 groups=module.groups,
             )
+        if isinstance(module, nn.BatchNorm2d):
+            x = self._resolve_arg(node.args[0], values)
+            scale = self._add_param_input(
+                frontend, f"{node.target}_weight", module.weight
+            )
+            bias = self._add_param_input(frontend, f"{node.target}_bias", module.bias)
+            mean = self._add_param_input(
+                frontend, f"{node.target}_running_mean", module.running_mean
+            )
+            variance = self._add_param_input(
+                frontend, f"{node.target}_running_var", module.running_var
+            )
+            return frontend.batch_norm(
+                x,
+                scale,
+                bias,
+                mean,
+                variance,
+                epsilon=module.eps,
+            )
         if isinstance(module, nn.MaxPool2d):
             x = self._resolve_arg(node.args[0], values)
             return frontend.max_pool2d(

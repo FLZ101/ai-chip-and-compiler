@@ -243,6 +243,9 @@ Status: **implemented**
 - ResNet18 or MobileNetV3-Small runs end to end.
 - Output matches PyTorch/ONNX Runtime.
 
+Status: **cropped pretrained stem implemented; full 224x224 model pending
+codegen scalability**
+
 ### M5: Real LLM decode
 
 - GPT-2-small or Pythia-70M runs a short greedy decode loop.
