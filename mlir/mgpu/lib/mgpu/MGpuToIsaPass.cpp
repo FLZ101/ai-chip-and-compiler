@@ -2435,7 +2435,8 @@ struct MGpuToIsaPass
     int64_t spatialSize = oh * ow;
     int64_t reductionSize = c * kh * kw;
     if (spatialSize > 16 || reductionSize > 16 || f > 16)
-      return std::nullopt;
+      return emitScalarConvIsa(imageValue, weightValue, outputValue, biasValue,
+                               hasBias, c, h, w, f, kh, kw, oh, ow);
 
     int64_t imageBase = bufferMap.base(imageValue);
     int64_t weightBase = bufferMap.base(weightValue);
@@ -2499,6 +2500,103 @@ struct MGpuToIsaPass
     result.grid = "1x1x1";
     result.block = "32x1x1";
     return result;
+  }
+
+  std::optional<IsaText> emitScalarConvIsa(
+      Value imageValue, Value weightValue, Value outputValue, Value biasValue,
+      bool hasBias, int64_t c, int64_t h, int64_t w, int64_t f, int64_t kh,
+      int64_t kw, int64_t oh, int64_t ow) {
+    int64_t imageBase = bufferMap.base(imageValue);
+    int64_t weightBase = bufferMap.base(weightValue);
+    int64_t outputBase = bufferMap.base(outputValue);
+    int64_t biasBase = hasBias ? bufferMap.base(biasValue) : 0;
+    int64_t total = f * oh * ow;
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, total);
+    os << "IDIV R1, R0, " << (oh * ow) << "\n"
+       << "MUL R4, R1, " << (oh * ow) << "\n"
+       << "SUB R5, R0, R4\n"
+       << "IDIV R2, R5, " << ow << "\n"
+       << "MUL R6, R2, " << ow << "\n"
+       << "SUB R3, R5, R6\n"
+       << "MOV R20, 0\n";
+
+    for (int64_t ci = 0; ci < c; ++ci) {
+      for (int64_t ky = 0; ky < kh; ++ky) {
+        for (int64_t kx = 0; kx < kw; ++kx) {
+          int64_t ihConst = ky;
+          int64_t iwConst = kx;
+          os << "MOV R4, 1\n"
+             << "MUL R4, R2, R4\n"
+             << "ADD R4, R4, " << ihConst << "\n"
+             << "CMP.GE R5, R4, 0\n"
+             << "MOV R6, " << h << "\n"
+             << "CMP.LT R7, R4, R6\n"
+             << "MUL R8, R5, R7\n"
+             << "MOV R9, 0\n"
+             << "MAX R10, R4, R9\n"
+             << "MOV R9, " << (h - 1) << "\n"
+             << "MIN R10, R10, R9\n"
+             << "MOV R11, 1\n"
+             << "MUL R11, R3, R11\n"
+             << "ADD R11, R11, " << iwConst << "\n"
+             << "CMP.GE R12, R11, 0\n"
+             << "MOV R13, " << w << "\n"
+             << "CMP.LT R14, R11, R13\n"
+             << "MUL R15, R12, R14\n"
+             << "MUL R18, R8, R15\n"
+             << "MOV R16, 0\n"
+             << "MAX R17, R11, R16\n"
+             << "MOV R16, " << (w - 1) << "\n"
+             << "MIN R17, R17, R16\n"
+             << "MOV R19, " << (ci * h) << "\n"
+             << "ADD R19, R19, R10\n"
+             << "MUL R19, R19, " << w << "\n"
+             << "ADD R19, R19, R17\n"
+             << "MUL R19, R19, 4\n"
+             << "ADD R19, R19, " << imageBase << "\n"
+             << "LDG R6, [R19]\n"
+             << "MOV R7, 0\n"
+             << "SEL R8, R18, R6, R7\n"
+             << "MOV R9, " << c << "\n"
+             << "MUL R9, R1, R9\n"
+             << "ADD R9, R9, " << ci << "\n"
+             << "MUL R9, R9, " << kh << "\n"
+             << "ADD R9, R9, " << ky << "\n"
+             << "MUL R9, R9, " << kw << "\n"
+             << "ADD R9, R9, " << kx << "\n"
+             << "MUL R9, R9, 4\n"
+             << "ADD R9, R9, " << weightBase << "\n"
+             << "LDG R11, [R9]\n"
+             << "FMA R20, R8, R11, R20\n";
+        }
+      }
+    }
+
+    if (hasBias) {
+      os << "MUL R4, R1, 4\n"
+         << "ADD R4, R4, " << biasBase << "\n"
+         << "LDG R6, [R4]\n"
+         << "ADD R20, R20, R6\n";
+    }
+
+    os << "MUL R4, R1, " << (oh * ow) << "\n"
+       << "MUL R5, R2, " << ow << "\n"
+       << "ADD R4, R4, R5\n"
+       << "ADD R4, R4, R3\n"
+       << "MUL R4, R4, 4\n"
+       << "ADD R4, R4, " << outputBase << "\n"
+       << "STG [R4], R20\n";
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((total + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
   }
 
   static void emitAttentionQFragment(llvm::raw_ostream &os, int dest,

@@ -67,8 +67,11 @@ def lower_kernel(
     if node.op in CPP_SUPPORTED_OPS:
         from ..mlir.mgpu_runner import MGpuOptError, lower_with_mgpu_opt
 
-        if node.op == Op.CONV2D and len(node.inputs) != 2:
-            return lower_kernel_python(graph, mlir_text, layout)
+        if node.op == Op.CONV2D:
+            padding = node.attrs.get("padding", 0)
+            has_padding = any(padding) if isinstance(padding, tuple) else padding != 0
+            if has_padding:
+                return lower_kernel_python(graph, mlir_text, layout)
         try:
             return lower_with_mgpu_opt(graph, mlir_text, layout)
         except MGpuOptError:
