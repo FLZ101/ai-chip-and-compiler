@@ -198,7 +198,8 @@ Exit criteria:
 - conv/reduction emit bounded-size ISA for large tensors,
 - generated ISA still matches NumPy references.
 
-Status: **partially implemented (grid-aware elementwise and wave execution)**
+Status: **implemented (grid-aware elementwise, wave execution, and
+loop-based scalar conv)**
 
 ### 4.7 Runtime launch queue and synchronization
 

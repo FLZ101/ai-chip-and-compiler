@@ -6,12 +6,15 @@ import unittest
 
 import numpy as np
 
+from compiler.codegen import lower_kernel
 from compiler.frontends.manual_frontend import ManualFrontend
 from compiler.mlir import MLIRBuilder, run_mgpu_pipeline
 from compiler.model_ir import DType
 from hw.device import create_device, launch
 from hw.isa import parse_asm
 from runtime.driver import Driver
+
+from tests.operator_e2e.helpers import run_operator_e2e
 
 
 class TestHardwareScalingEndToEnd(unittest.TestCase):
@@ -96,6 +99,46 @@ class TestHardwareScalingEndToEnd(unittest.TestCase):
             device.global_memory.read_floats(2 * n * 4, n), dtype=np.float32
         )
         np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+    def test_large_reduction_conv_uses_loop_isa(self):
+        rng = np.random.default_rng(8)
+        image = rng.normal(size=(1, 2, 5, 5)).astype(np.float32)
+        weight = rng.normal(size=(2, 2, 3, 3)).astype(np.float32)
+        bias = rng.normal(size=(2,)).astype(np.float32)
+
+        frontend = ManualFrontend("scalar_conv")
+        x = frontend.add_input("x", DType.F32, image.shape)
+        w = frontend.add_input("w", DType.F32, weight.shape)
+        b = frontend.add_input("b", DType.F32, bias.shape)
+        frontend.output(frontend.conv2d(x, w, b))
+
+        def reference(image, weight, bias):
+            n, c, h, w = image.shape
+            f, _, kh, kw = weight.shape
+            out = np.zeros((n, f, h - kh + 1, w - kw + 1), dtype=np.float32)
+            for ff in range(f):
+                for oy in range(out.shape[2]):
+                    for ox in range(out.shape[3]):
+                        acc = bias[ff]
+                        for cc in range(c):
+                            for ky in range(kh):
+                                for kx in range(kw):
+                                    acc += (
+                                        image[0, cc, oy + ky, ox + kx]
+                                        * weight[ff, cc, ky, kx]
+                                    )
+                        out[0, ff, oy, ox] = acc
+            return out
+
+        result = run_operator_e2e(
+            create_device(global_size=1 << 20, sm_count=4),
+            frontend.build(),
+            {"x": image, "w": weight, "b": bias},
+            [reference(image, weight, bias)],
+            lowering=lower_kernel,
+            atol=1e-5,
+        )
+        self.assertIn("conv_reduce_loop", result.isa_text)
 
 
 if __name__ == "__main__":
