@@ -8,21 +8,21 @@ separate later phases.
 
 ## Current status
 
-Partial. The committed helpers cover lane-index setup, zeroing a fragment,
-shared-memory load/store for a 16x16 tile, query-tile and key-tile loop
-headers, tiled Q and K^T fragment loads, `MMA` accumulation, and full-tile
-shared-memory stores.
+Complete. The score-only tiled path is implemented behind
+`--mgpu-emit-attention-score` and covered by FileCheck. The public
+`mgpu.attention` lowering is unchanged by default.
+
+The implementation now includes:
+
+- query-tile, key-tile, and reduction/dim-tile loop helpers,
+- dynamic tiled Q and K^T fragment loads,
+- dynamic score-tile stores,
+- `emitTiledAttentionScoreIsa`,
+- a pass option that selects score-only lowering for rank-4 attention.
 
 The existing large-shape attention path still uses `emitScalarAttentionIsa`
-and passes a numerical test for `seq=8`, `head_dim=64`. That scalar fallback
-is intentionally kept until Phase 3/4 can consume tiled score tiles.
-
-Still missing:
-
-- reduction/head-dimension tile loop,
-- a score-only tiled emitter,
-- a test hook that exercises that emitter,
-- FileCheck coverage for tiled loops and `MMA`.
+when the test option is disabled, so the full numerical attention test remains
+the active fallback until Phase 3/4 consume the tiled score tiles.
 
 ## Shape model
 
@@ -31,8 +31,8 @@ Q: memref<batch x heads x seq x head_dim x f32>
 K: memref<batch x heads x seq x head_dim x f32>
 ```
 
-Phase 2 targets `batch=1` first. The same loop structure later extends to
-arbitrary batch/head by adding block mapping in Phase 5.
+The current score emitter supports `batch=1`, `heads=1`. Arbitrary batch/head
+is deferred to Phase 5 block mapping.
 
 ## Tile configuration
 
@@ -86,11 +86,12 @@ R39       scratch immediate/address temporary
 R40..R42  query-tile loop counter, limit, predicate
 R43..R45  key-tile loop counter, limit, predicate
 R46..R47  dim-tile loop counter and limit
+R48       dynamic score-tile shared-memory base
 ```
 
-The fragment helpers overwrite `R26..R37`, `R39`, and `R42`, which is safe
-because those values are not live across a fragment load. Loop counters must
-not be placed in those scratch registers.
+The fragment helpers overwrite `R26..R37`, `R38`, `R39`, and `R42`, which is
+safe because those values are not live across a fragment load. Loop counters
+must not be placed in those scratch registers.
 
 ## Shared-memory layout
 
@@ -110,9 +111,11 @@ Phase 2 is score-only, and the public `mgpu.attention` op must still produce a
 complete attention output. Therefore do not replace the scalar fallback with
 an incomplete tiled path.
 
-Add a temporary pass option such as `--mgpu-emit-attention-score` to
-`mgpu-to-isa`. When enabled, large rank-4 attention ops emit only the tiled
-score stage into shared memory and exit. Normal lowering is unchanged.
+The pass option is `--mgpu-emit-attention-score` on `mgpu-to-isa`; in a
+pass pipeline it is spelled
+`func.func(mgpu-to-isa{emit-attention-score})`. When enabled, rank-4
+attention ops emit only the tiled score stage into shared memory and exit.
+Normal lowering is unchanged.
 
 This test hook lets FileCheck verify the exact tiled ISA without pretending
 the full attention kernel is complete. Numerical score validation is deferred
@@ -121,7 +124,7 @@ through the complete attention result.
 
 ## Steps
 
-Steps 1-2 are already committed. Steps 3-6 are remaining.
+All steps are implemented and tested.
 
 ### Step 1: Emit outer query-tile loop
 
@@ -161,7 +164,7 @@ Exit:
 
 ### Step 4: Wire existing fragment helpers into a score emitter
 
-Add `emitTiledAttentionScoreIsa` and generate:
+`emitTiledAttentionScoreIsa` generates:
 
 ```text
 query_tile_loop
@@ -184,9 +187,13 @@ Exit:
 - score accumulator is updated across reduction tiles,
 - score tile is stored at the offset above.
 
+The original static-offset fragment helpers were replaced with dynamic
+register-based versions so the loop counters can address the correct tile at
+runtime. Score stores use `R48` as a dynamic shared-memory base.
+
 ### Step 5: Add the test-only pass option
 
-Wire `--mgpu-emit-attention-score` so tests can lower score-only attention
+Added `--mgpu-emit-attention-score` so tests can lower score-only attention
 without changing the default full-attention path.
 
 Exit:
@@ -196,7 +203,7 @@ Exit:
 
 ### Step 6: Add FileCheck coverage
 
-Test:
+Tested:
 
 - `seq=8`, `head_dim=64`,
 - `seq=32`, `head_dim=32`.
