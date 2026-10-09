@@ -8,6 +8,9 @@ implementation plan for the "Hardware scaling" section in
 The focused follow-up plan for a real pretrained GPT-2-small decode loop is in
 [gpt2-small-run-plan.md](gpt2-small-run-plan.md).
 
+The equivalent focused plan for a real pretrained ResNet18 forward is in
+[resnet18-run-plan.md](resnet18-run-plan.md).
+
 ## 1. Goal
 
 Run the already-imported real models end to end:
