@@ -3176,6 +3176,24 @@ struct MGpuToIsaPass
        << "STS [R28], R" << sourceBase << "\n";
   }
 
+  static void emitQueryTileLoopStart(llvm::raw_ostream &os, int qTiles,
+                                     const std::string &endLabel) {
+    os << "MOV R40, 0\n"
+       << "MOV R41, " << qTiles << "\n"
+       << "query_tile_loop:\n"
+       << "CMP.LT R42, R40, R41\n"
+       << "BRA query_tile_body, R42, " << endLabel << "\n"
+       << "BRA " << endLabel << "\n"
+       << "query_tile_body:\n";
+  }
+
+  static void emitQueryTileLoopEnd(llvm::raw_ostream &os,
+                                   const std::string &endLabel) {
+    os << "ADD R40, R40, 1\n"
+       << "BRA query_tile_loop\n"
+       << endLabel << ":\n";
+  }
+
   static void emitStoreSharedFragment(llvm::raw_ostream &os, int source,
                                       int rowGroup, int colGroup,
                                       int64_t offset) {
