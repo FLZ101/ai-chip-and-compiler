@@ -30,13 +30,14 @@ shapes.
 
 ## 2. Current status
 
-Phases 1 through 4 are implemented and tested:
+Phases 1 through 5 are implemented and tested:
 
 - Phase 1: reusable fragment staging helpers.
 - Phase 2: tiled Q @ K^T score loops over query, key, and head-dimension
   tiles.
 - Phase 3: two-pass tiled softmax with explicit causal masking.
 - Phase 4: tiled value accumulation and global output writes.
+- Phase 5: batch/head/query-tile block mapping.
 
 The original small-shape path still handles `seq <= 16` and `head_dim <= 16`.
 Large rank-4 attention still falls back to `emitScalarAttentionIsa` by
@@ -194,14 +195,14 @@ Exit:
 - full attention matches a NumPy reference for `seq=8`, `head_dim=64`,
 - full attention matches for `seq=32`, `head_dim=32`,
 - `head_dim=20` verifies padded V tiles,
-- generated ISA contains `value_q_tile_loop`, `value_v_tile_loop`,
-  `value_k_tile_loop`, and `STG`.
+- generated ISA contains `value_v_tile_loop`, `value_k_tile_loop`, and
+  `STG`.
 
 The value stage loads normalized score tiles from shared memory, loads V
 tiles from global memory, accumulates with `MMA`, and stores only in-bounds
 output elements so padded rows/columns do not corrupt adjacent buffers.
 
-### Phase 5: General loop and grid mapping
+### Phase 5: General loop and grid mapping — complete
 
 Map:
 
@@ -211,10 +212,23 @@ batch * heads * query_tiles -> blocks
 
 Use the existing wave scheduler.
 
+Files:
+
+- `mlir/mgpu/lib/mgpu/MGpuToIsaPass.cpp`
+- `tests/mlir/mgpu_to_isa_attention_mapped.mlir`
+- `tests/operator_e2e/test_tiled_attention_kernels_e2e.py`
+
 Exit:
 
-- arbitrary static batch/head/seq combinations run in multiple blocks,
-- repeated launches are deterministic.
+- `batch=2`, `heads=3`, `seq=8`, `head_dim=16` runs as six blocks,
+- `batch=1`, `heads=2`, `seq=20`, `head_dim=24` runs as four query-tile
+  blocks,
+- output matches a NumPy reference for both cases,
+- the generated grid is `batch * heads * ceil(seq / 16)`.
+
+The mapped kernel decodes `ctaid.x` into `(batch, head, query_tile)`, computes
+per-batch/head buffer bases once, and stores only the score tiles owned by
+that query tile.
 
 ### Phase 6: Differential and lit tests
 
@@ -242,7 +256,7 @@ Exit:
 2. tiled score computation — complete
 3. causal masking and softmax — complete
 4. tiled value accumulation — complete
-5. loop and grid mapping
+5. loop and grid mapping — complete
 6. differential and lit tests
 ```
 
