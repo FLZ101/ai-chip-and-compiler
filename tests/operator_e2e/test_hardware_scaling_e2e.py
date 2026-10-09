@@ -165,6 +165,28 @@ class TestHardwareScalingEndToEnd(unittest.TestCase):
         )
         self.assertEqual(len(driver.profiler.records), 2)
 
+    def test_large_scalar_matmul_uses_waves(self):
+        rng = np.random.default_rng(9)
+        a = rng.normal(size=(8, 4)).astype(np.float32)
+        b = rng.normal(size=(4, 8)).astype(np.float32)
+        expected = a @ b
+
+        frontend = ManualFrontend("scalar_matmul")
+        lhs = frontend.add_input("a", DType.F32, a.shape)
+        rhs = frontend.add_input("b", DType.F32, b.shape)
+        frontend.output(frontend.matmul(lhs, rhs))
+
+        result = run_operator_e2e(
+            create_device(global_size=1 << 20, sm_count=4),
+            frontend.build(),
+            {"a": a, "b": b},
+            [expected],
+            lowering=lower_kernel,
+            atol=1e-5,
+        )
+        self.assertIn("ctaid.x", result.isa_text)
+        self.assertIn("mat_loop", result.isa_text)
+
 
 if __name__ == "__main__":
     unittest.main()

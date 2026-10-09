@@ -2447,7 +2447,7 @@ struct MGpuToIsaPass
     int64_t kB = bType.getShape()[0];
     int64_t n = bType.getShape()[1];
     int64_t total = m * n;
-    if (k != kB || total > 32)
+    if (k != kB)
       return std::nullopt;
 
     Type aElementType = aType.getElementType();
@@ -2463,10 +2463,13 @@ struct MGpuToIsaPass
     int64_t aBase = bufferMap.base(dstOp.getDpsInputs()[0]);
     int64_t bBase = bufferMap.base(dstOp.getDpsInputs()[1]);
     int64_t cBase = bufferMap.base(dstOp.getDpsInits()[0]);
+    int64_t gridX = (total + 31) / 32;
 
     std::string code;
     llvm::raw_string_ostream os(code);
-    os << "MOV R0, tid.x\n"
+    os << "MOV R0, ctaid.x\n"
+       << "MUL R0, R0, ntid.x\n"
+       << "ADD R0, R0, tid.x\n"
        << "MOV R1, " << total << "\n"
        << "CMP.LT R2, R0, R1\n"
        << "BRA body, R2, end\n"
@@ -2511,7 +2514,7 @@ struct MGpuToIsaPass
 
     IsaText result;
     result.code = code;
-    result.grid = "1x1x1";
+    result.grid = std::to_string(gridX) + "x1x1";
     result.block = "32x1x1";
     return result;
   }
