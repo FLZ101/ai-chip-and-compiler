@@ -55,12 +55,22 @@ this blocker; see `docs/cpp-simulator-plan.md`.
 
 `docs/cpp-simulator-plan.md` defines the next major performance work:
 
-- C++ ISA parser matching `hw/isa.py`
-- typed C++ memory subsystem
-- SIMT execution core and wave scheduler
-- timing/profile counter parity
-- pybind11 wrapper behind the existing `hw.device` API
-- full ResNet18 224x224 validation with `MGPU_CPP_SIM=1`
+- Phase 0: C++ ISA parser is implemented under `cpp_sim/`.
+- Phase 1: typed C++ memory subsystem is implemented.
+- Phase 2: SIMT execution core with branch reconvergence is implemented.
+- Phase 3: timing/profile metadata is present in the core structures.
+- Phase 4: pybind11 backend and `MGPU_CPP_SIM=1` wrapper are implemented.
+- Phase 5: benchmark harness and Makefile targets are implemented.
+- Phase 6: full ResNet18 224x224 validation is still too slow with the current
+  instruction interpreter and is not yet passing.
+
+Build native simulator:
+
+```bash
+make cpp-sim
+make cpp-sim-test
+make benchmark-cpp-sim
+```
 
 ## Verification commands
 
@@ -125,9 +135,11 @@ GPT-2-small is also cached at:
 
 ## Likely next work
 
-1. Start `docs/cpp-simulator-plan.md` Phase 0: C++ ISA parser.
-2. Run and debug the opt-in full ResNet18 224x224 forward after the C++
-   simulator becomes available.
+1. Optimize the C++ execution loop so Phase 6 full ResNet18 validation can
+   finish; likely priorities are predecoded operands, direct register arrays,
+   and parallel SM execution.
+2. Run and debug the opt-in full ResNet18 224x224 forward with
+   `MGPU_FULL_RESNET18=1 MGPU_CPP_SIM=1`.
 3. Continue the GPT-2-small plan in `docs/gpt2-small-run-plan.md`, especially
    multi-head attention and KV-cache execution.
 4. Continue hardware-scaling work documented in the hardware-scaling and
