@@ -35,7 +35,7 @@ setup: $(SETUP_STAMP)
 $(SETUP_STAMP): pyproject.toml
 	test -d $(VENV) || $(PYTHON) -m venv $(VENV)
 	$(PIP) install --upgrade pip
-	$(PIP) install -e '.[test]'
+	$(PIP) install -e '.[test,dev]'
 	$(BIN)/pre-commit install
 	touch $(SETUP_STAMP)
 
