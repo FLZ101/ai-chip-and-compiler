@@ -2,8 +2,10 @@
 
 ## 1. Goal
 
-Replace the current small-shape `mgpu.attention` MMA path with a tiled,
-loop-based implementation that supports:
+Replace the current small-shape `mgpu.attention` MMA path with a **general**
+tiled, loop-based implementation. The implementation must not hard-code
+GPT-2 sizes. It should support arbitrary static shapes within simulator
+resources, including:
 
 ```text
 batch=1
@@ -13,6 +15,15 @@ head_dim=64
 ```
 
 and later larger sequences.
+
+General requirements:
+
+- arbitrary `batch`, `heads`, `seq`, and `head_dim`,
+- `head_dim` need not be a multiple of 16 for the outer algorithm,
+  although MMA tiles naturally require padding internally,
+- rank-2 and rank-4 Q/K/V layouts where shape information is available,
+- masked and unmasked attention,
+- user-supplied scale.
 
 The generated ISA must remain bounded and must match PyTorch on GPT-2-like
 shapes.
@@ -37,7 +48,12 @@ so this path cannot lower the real model.
 - Key/value tile: `16 x 16`
 - Output tile: `16 x 16`
 
-For `head_dim=64`, four key/value tiles are needed.
+The number of key/value tiles is computed from the shape:
+
+```text
+num_k_tiles = ceil(seq / 16)
+num_v_tiles = ceil(head_dim / 16)
+```
 
 ### 3.2 Algorithm
 
@@ -93,6 +109,9 @@ score producer -> softmax consumer
 softmax producer -> output producer
 ```
 
+The same generated loop structure must work for any static shape. Padding
+tiles that extend beyond `seq` or `head_dim` are masked or zeroed.
+
 ## 4. Implementation phases
 
 ### Phase 1: Fragment staging helpers
@@ -113,9 +132,9 @@ Exit:
 - existing small attention tests still pass,
 - helper functions are reusable.
 
-### Phase 2: Tiled score computation
+### Phase 2: General tiled score computation
 
-Generate ISA loops over query/key tiles.
+Generate ISA loops over query/key tiles using computed tile counts.
 
 Files:
 
@@ -123,7 +142,8 @@ Files:
 
 Exit:
 
-- `seq=8`, `head_dim=64` score tiles are produced,
+- multiple static shapes produce correct score tiles,
+- padding tiles are handled correctly,
 - `MMA` is called with fragment-staged Q/K tiles.
 
 ### Phase 3: Causal masking and softmax
@@ -144,9 +164,9 @@ Exit:
 
 - causal attention matches a NumPy softmax reference on cropped shapes.
 
-### Phase 4: Tiled value accumulation
+### Phase 4: General tiled value accumulation
 
-Generate value-tile loops:
+Generate value-tile loops over computed `head_dim` tile count:
 
 ```text
 output += normalized_score @ V_tile
@@ -158,9 +178,10 @@ Files:
 
 Exit:
 
-- full attention output matches PyTorch for `heads=12`, `seq=8`, `head_dim=64`.
+- full attention output matches PyTorch for multiple shapes,
+- `head_dim` not divisible by 16 is handled via padded V tiles.
 
-### Phase 5: Loop and grid mapping
+### Phase 5: General loop and grid mapping
 
 Map:
 
@@ -172,7 +193,7 @@ Use the existing wave scheduler.
 
 Exit:
 
-- large attention runs in multiple blocks,
+- arbitrary static batch/head/seq combinations run in multiple blocks,
 - repeated launches are deterministic.
 
 ### Phase 6: Differential and lit tests
