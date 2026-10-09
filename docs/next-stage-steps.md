@@ -700,6 +700,8 @@ Detailed plan: [hardware-scaling-plan.md](hardware-scaling-plan.md)
 
 ### 7.1 Add launch queue/command buffer
 
+Status: **done**
+
 Files:
 
 - `runtime/driver.py`
@@ -709,13 +711,22 @@ Tests:
 
 - queued launches execute deterministically.
 
+Implemented by ``Driver.enqueue``/``Driver.flush`` and covered by the
+runtime FIFO and deterministic launch tests.
+
 ### 7.2 Add explicit synchronization
+
+Status: **done**
 
 Tests:
 
 - synchronization does not corrupt state.
 
+Implemented by ``Driver.synchronize``/``Driver.sync``.
+
 ### 7.3 Add source-location diagnostics
+
+Status: **done**
 
 Include:
 
@@ -729,7 +740,12 @@ Tests:
 
 - invalid graph errors contain all fields.
 
+Implemented with ``compiler.model_ir.SourceLocation`` and source-aware
+graph validation messages.
+
 ### 7.4 Add autotuning hooks
+
+Status: **done**
 
 Expose:
 
@@ -740,6 +756,8 @@ Expose:
 Tests:
 
 - autotuner runs without changing numerical results.
+
+Implemented by ``runtime.autotuner.TuningConfig``/``autotune``.
 
 ---
 
