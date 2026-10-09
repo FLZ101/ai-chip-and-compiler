@@ -27,12 +27,29 @@ class BufferMap {
 public:
   static BufferMap build(func::FuncOp func) {
     BufferMap map;
+    bool sawLayout = false;
     func.walk([&](mgpu::MemoryLayoutOp layout) {
+      sawLayout = true;
       for (auto [value, offset] :
            llvm::zip(layout.getBuffers(), layout.getOffsets())) {
         map.offsets[value] = offset;
       }
     });
+    if (!sawLayout) {
+      int64_t cursor = 0;
+      for (Value arg : func.getArguments()) {
+        if (auto type = dyn_cast<MemRefType>(arg.getType())) {
+          map.offsets[arg] = cursor;
+          cursor += byteSize(type);
+        }
+      }
+      func.walk([&](memref::AllocOp alloc) {
+        if (auto type = dyn_cast<MemRefType>(alloc.getType())) {
+          map.offsets[alloc.getResult()] = cursor;
+          cursor += byteSize(type);
+        }
+      });
+    }
     return map;
   }
 
@@ -51,6 +68,13 @@ public:
   }
 
 private:
+  static int64_t byteSize(MemRefType type) {
+    int64_t elements = 1;
+    for (int64_t dim : type.getShape())
+      elements *= dim;
+    return elements * (type.getElementTypeBitWidth() / 8);
+  }
+
   DenseMap<Value, int64_t> offsets;
 };
 
@@ -401,8 +425,11 @@ struct MGpuToIsaPass
     int64_t n = outputType.getShape()[0];
     int64_t blockSize = 32;
     int64_t gridX = (n + blockSize - 1) / blockSize;
-    int64_t leftDelta = n * 4;
-    int64_t outputDelta = 2 * n * 4;
+    int64_t leftBase = bufferMap.base(dstOp.getDpsInputs()[0]);
+    int64_t rightBase = bufferMap.base(dstOp.getDpsInputs()[1]);
+    int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
+    int64_t leftDelta = rightBase - leftBase;
+    int64_t outputDelta = outputBase - leftBase;
 
     VirtualRegisterAllocator regs;
     int tid = regs.acquire();
@@ -426,7 +453,7 @@ struct MGpuToIsaPass
        << "BRA end\n"
        << "body:\n"
        << "MUL " << regs.name(addr) << ", " << regs.name(tid) << ", 4\n"
-       << "MOV " << regs.name(base) << ", 0\n"
+       << "MOV " << regs.name(base) << ", " << leftBase << "\n"
        << "ADD " << regs.name(addr) << ", " << regs.name(addr) << ", "
        << regs.name(base) << "\n"
        << "LDG " << regs.name(left) << ", [" << regs.name(addr) << "]\n"
@@ -529,8 +556,11 @@ struct MGpuToIsaPass
     int64_t n = outputType.getShape()[0];
     int64_t blockSize = 32;
     int64_t gridX = (n + blockSize - 1) / blockSize;
-    int64_t leftDelta = n * 4;
-    int64_t outputDelta = 2 * n * 4;
+    int64_t leftBase = bufferMap.base(dstOp.getDpsInputs()[0]);
+    int64_t rightBase = bufferMap.base(dstOp.getDpsInputs()[1]);
+    int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
+    int64_t leftDelta = rightBase - leftBase;
+    int64_t outputDelta = outputBase - leftBase;
 
     VirtualRegisterAllocator regs;
     int tid = regs.acquire();
@@ -553,6 +583,8 @@ struct MGpuToIsaPass
        << "BRA end\n"
        << "body:\n"
        << "MUL " << regs.name(addr) << ", " << regs.name(tid) << ", 4\n"
+       << "ADD " << regs.name(addr) << ", " << regs.name(addr) << ", "
+       << leftBase << "\n"
        << "LDG " << regs.name(left) << ", [" << regs.name(addr) << "]\n"
        << "LDG " << regs.name(right) << ", [" << regs.name(addr) << " + "
        << leftDelta << "]\n"
@@ -590,6 +622,8 @@ struct MGpuToIsaPass
       return std::nullopt;
 
     int64_t n = inputType.getShape()[0];
+    int64_t inputBase = bufferMap.base(dstOp.getDpsInputs()[0]);
+    int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
     std::string identity = (*opcode == "MAX") ? "-1.0e30" : "0";
 
     std::string code;
@@ -602,13 +636,13 @@ struct MGpuToIsaPass
        << "body:\n"
        << "MOV R3, " << identity << "\n";
     for (int64_t i = 0; i < n; ++i) {
-      os << "MOV R4, " << (i * 4) << "\n"
+      os << "MOV R4, " << (inputBase + i * 4) << "\n"
          << "LDG R5, [R4]\n"
          << *opcode << " R3, R3, R5\n";
     }
     if (divideByCount)
       os << "DIV R3, R3, " << n << "\n";
-    os << "MOV R4, " << (n * 4) << "\n"
+    os << "MOV R4, " << outputBase << "\n"
        << "STG [R4], R3\n"
        << "BRA end\n"
        << "end:\n"
@@ -2123,9 +2157,9 @@ struct MGpuToIsaPass
     if (m != 16 || k != 16 || kB != 16 || n != 16)
       return std::nullopt;
 
-    int64_t aBase = 0;
-    int64_t bBase = m * k * 4;
-    int64_t cBase = bBase + k * n * 4;
+    int64_t aBase = bufferMap.base(dstOp.getDpsInputs()[0]);
+    int64_t bBase = bufferMap.base(dstOp.getDpsInputs()[1]);
+    int64_t cBase = bufferMap.base(dstOp.getDpsInits()[0]);
 
     std::string code;
     llvm::raw_string_ostream os(code);
