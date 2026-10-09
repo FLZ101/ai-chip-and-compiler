@@ -3194,6 +3194,24 @@ struct MGpuToIsaPass
        << endLabel << ":\n";
   }
 
+  static void emitKeyTileLoopStart(llvm::raw_ostream &os, int kTiles,
+                                   const std::string &endLabel) {
+    os << "MOV R43, 0\n"
+       << "MOV R44, " << kTiles << "\n"
+       << "key_tile_loop:\n"
+       << "CMP.LT R45, R43, R44\n"
+       << "BRA key_tile_body, R45, " << endLabel << "\n"
+       << "BRA " << endLabel << "\n"
+       << "key_tile_body:\n";
+  }
+
+  static void emitKeyTileLoopEnd(llvm::raw_ostream &os,
+                                 const std::string &endLabel) {
+    os << "ADD R43, R43, 1\n"
+       << "BRA key_tile_loop\n"
+       << endLabel << ":\n";
+  }
+
   static void emitStoreSharedFragment(llvm::raw_ostream &os, int source,
                                       int rowGroup, int colGroup,
                                       int64_t offset) {
