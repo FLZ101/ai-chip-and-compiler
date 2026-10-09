@@ -3212,6 +3212,24 @@ struct MGpuToIsaPass
        << endLabel << ":\n";
   }
 
+  static void emitDimTileLoopStart(llvm::raw_ostream &os, int dTiles,
+                                   const std::string &endLabel) {
+    os << "MOV R46, 0\n"
+       << "MOV R47, " << dTiles << "\n"
+       << "dim_tile_loop:\n"
+       << "CMP.LT R38, R46, R47\n"
+       << "BRA dim_tile_body, R38, " << endLabel << "\n"
+       << "BRA " << endLabel << "\n"
+       << "dim_tile_body:\n";
+  }
+
+  static void emitDimTileLoopEnd(llvm::raw_ostream &os,
+                                 const std::string &endLabel) {
+    os << "ADD R46, R46, 1\n"
+       << "BRA dim_tile_loop\n"
+       << endLabel << ":\n";
+  }
+
   static void emitMmaAccumulate(llvm::raw_ostream &os, int dstBase,
                                 int aBase, int bBase, int cBase) {
     os << "MMA R" << dstBase << ", R" << aBase << ", R" << bBase << ", R"
