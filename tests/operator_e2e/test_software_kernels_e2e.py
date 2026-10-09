@@ -348,6 +348,27 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
         )
         np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-4, atol=1e-4)
 
+    def test_large_linear_software_reference(self):
+        rng = np.random.default_rng(23)
+        x = rng.normal(size=(128, 256)).astype(np.float32)
+        w = rng.normal(size=(512, 256)).astype(np.float32)
+        bias = rng.normal(size=(512,)).astype(np.float32)
+        frontend = ManualFrontend("large_linear")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        weight = frontend.add_input("w", DType.F32, w.shape)
+        b = frontend.add_input("b", DType.F32, bias.shape)
+        frontend.output(frontend.linear(value, weight, b))
+        expected = x @ w.T + bias
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 24, sm_count=4),
+            frontend.build(),
+            {"x": x, "w": w, "b": bias},
+            [expected],
+            rtol=1e-4,
+            atol=1e-4,
+        )
+        np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-4, atol=1e-4)
+
     def test_resize_software_matches_mgpu(self):
         image = np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)
         frontend = ManualFrontend("resize")
