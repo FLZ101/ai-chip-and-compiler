@@ -467,6 +467,9 @@ def run_software_model_e2e(
         ):
             _run_python_software_node(device, node, layout)
             continue
+        if node.op == Op.LINEAR and node.inputs[0].rank != 2:
+            _run_python_software_node(device, node, layout)
+            continue
         try:
             request = _software_request(node, layout)
         except NotImplementedError:
@@ -529,6 +532,16 @@ def _run_python_software_node(
         left = _read_node_input(device, node.inputs[0], layout)
         right = _read_node_input(device, node.inputs[1], layout)
         _write_node_output(device, output, layout, np.multiply(left, right))
+        return
+
+    if op == Op.LINEAR:
+        value = _read_node_input(device, node.inputs[0], layout)
+        weight = _read_node_input(device, node.inputs[1], layout)
+        result = np.matmul(value, np.swapaxes(weight, -1, -2))
+        if len(node.inputs) == 3:
+            bias = _read_node_input(device, node.inputs[2], layout)
+            result = result + bias
+        _write_node_output(device, output, layout, result)
         return
 
     if op == Op.MATMUL:
@@ -608,6 +621,12 @@ def _run_python_software_node(
         var = value.var(axis=-1, keepdims=True)
         normalized = (value - mean) / np.sqrt(var + eps)
         _write_node_output(device, output, layout, normalized * weight + bias)
+        return
+
+    if op == Op.GELU:
+        value = _read_node_input(device, node.inputs[0], layout)
+        cdf = np.vectorize(math.erf)(value / math.sqrt(2.0))
+        _write_node_output(device, output, layout, 0.5 * value * (1.0 + cdf))
         return
 
     if op == Op.RMS_NORM:

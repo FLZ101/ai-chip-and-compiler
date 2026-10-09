@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -468,6 +469,43 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
                 np.testing.assert_allclose(
                     result.outputs[0], expected, rtol=1e-3, atol=1e-3
                 )
+
+    def test_batched_linear_software_reference(self):
+        rng = np.random.default_rng(26)
+        x = rng.normal(size=(1, 8, 768)).astype(np.float32)
+        w = rng.normal(size=(3072, 768)).astype(np.float32)
+        b = rng.normal(size=(3072,)).astype(np.float32)
+        frontend = ManualFrontend("batched_linear")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        weight = frontend.add_input("w", DType.F32, w.shape)
+        bias = frontend.add_input("b", DType.F32, b.shape)
+        frontend.output(frontend.linear(value, weight, bias))
+        expected = x @ w.T + b
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 28, sm_count=16),
+            frontend.build(),
+            {"x": x, "w": w, "b": b},
+            [expected],
+            rtol=1e-3,
+            atol=1e-3,
+        )
+        np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-3, atol=1e-3)
+
+    def test_gelu_software_reference(self):
+        x = np.linspace(-4.0, 4.0, 64, dtype=np.float32).reshape(1, 4, 16)
+        frontend = ManualFrontend("gelu")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        frontend.output(frontend.gelu(value))
+        expected = 0.5 * x * (1.0 + np.vectorize(math.erf)(x / math.sqrt(2.0)))
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 20, sm_count=4),
+            frontend.build(),
+            {"x": x},
+            [expected.astype(np.float32)],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-5, atol=1e-5)
 
     @unittest.skipUnless(
         os.environ.get("MGPU_RUN_LARGE_LINEAR") == "1",
