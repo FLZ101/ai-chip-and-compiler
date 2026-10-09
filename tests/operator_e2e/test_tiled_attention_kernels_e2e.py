@@ -2,12 +2,21 @@ import unittest
 
 import numpy as np
 
+from compiler.codegen import lower_kernel
+from compiler.frontends.manual_frontend import ManualFrontend
 from compiler.mlir.mgpu_runner import run_mgpu_pipeline
+from compiler.model_ir import DType
 from hw.core import launch as python_launch
 from hw.device import create_device
 from hw.isa import parse_asm
 
-from .helpers import allocate_global_buffers, read_tensor
+from .helpers import (
+    allocate_global_buffers,
+    make_device,
+    read_tensor,
+    run_operator_e2e,
+    run_software_model_e2e,
+)
 
 
 def _attention_mlir(batch: int, heads: int, seq: int, dim: int, scale: float) -> str:
@@ -204,6 +213,41 @@ class TestTiledAttentionKernels(unittest.TestCase):
 
     def test_mapped_attention_multi_query_tile(self):
         self._check_mapped_attention(batch=1, heads=2, seq=20, dim=24)
+
+    def test_attention_mgpu_matches_software(self):
+        rng = np.random.default_rng(321)
+        q = rng.normal(size=(1, 1, 8, 16)).astype(np.float32)
+        k = rng.normal(size=(1, 1, 8, 16)).astype(np.float32)
+        v = rng.normal(size=(1, 1, 8, 16)).astype(np.float32)
+        mask = np.tril(np.ones((8, 8), dtype=np.float32)).reshape(1, 1, 8, 8)
+        scale = 1.0 / np.sqrt(16.0)
+
+        frontend = ManualFrontend("attention_mgpu_vs_software")
+        qv = frontend.add_input("q", DType.F32, q.shape)
+        kv = frontend.add_input("k", DType.F32, k.shape)
+        vv = frontend.add_input("v", DType.F32, v.shape)
+        mv = frontend.add_input("mask", DType.F32, mask.shape)
+        frontend.output(frontend.masked_attention(qv, kv, vv, mv, scale=scale))
+        graph = frontend.build()
+        inputs = {"q": q, "k": k, "v": v, "mask": mask}
+
+        software = run_software_model_e2e(
+            make_device(global_size=1 << 22, sm_count=4),
+            graph,
+            inputs,
+        )
+        mgpu = run_operator_e2e(
+            make_device(global_size=1 << 22, sm_count=4),
+            graph,
+            inputs,
+            lowering=lower_kernel,
+        )
+        np.testing.assert_allclose(
+            mgpu.outputs[0],
+            software.outputs[0],
+            rtol=1e-3,
+            atol=1e-3,
+        )
 
 
 if __name__ == "__main__":
