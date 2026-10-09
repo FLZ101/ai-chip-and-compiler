@@ -38,6 +38,9 @@ Already available:
   reshape, transpose, concat, slice, resize, softmax, masked softmax,
   layer norm, RMS norm, rope, KV cache, and attention.
 - software `embedding_gather` and `argmax` Model IR ops with reference tests.
+- software large masked-attention reference test for `heads=12`,
+  `head_dim=64`, and `seq=8`.
+- software large linear reference test for `128x256 -> 128x512`.
 - mgpu-vs-software differential tests for the supported operators.
 
 Missing for full GPT-2:
@@ -71,6 +74,8 @@ At `seq = 8`, FP32:
 
 ### Phase A: Import a static full model
 
+Status: **done**
+
 Implement:
 
 - export/import full `GPT2LMHeadModel` with
@@ -92,6 +97,8 @@ Exit criteria:
 - test is deterministic and skips offline.
 
 ### Phase B: Model IR coverage for GPT-2 ops
+
+Status: **partial**
 
 Add or complete Model IR / target ops:
 
@@ -118,7 +125,15 @@ Exit criteria:
 - every software kernel has a differential test against its mgpu
   implementation where the mgpu shape is supported.
 
+Remaining:
+
+- positional broadcast `add`,
+- full GPT-2 `Graph` construction from the pretrained model,
+- split/merge head shape handling for the complete attention path.
+
 ### Phase C: Multi-head attention
+
+Status: **software path partial**
 
 Implement a decomposed attention path:
 
@@ -151,7 +166,14 @@ Exit criteria:
 - causal mask produces correct triangular attention,
 - ISA uses bounded loops rather than unrolled head dimensions.
 
+Remaining:
+
+- generalized mgpu attention for `heads=12`, `head_dim=64`,
+- mgpu-vs-software attention test on a cropped equivalent shape.
+
 ### Phase D: Large linear/matmul execution
+
+Status: **software partial**
 
 Generalize the existing `Linear` and scalar matmul paths:
 
@@ -171,7 +193,14 @@ Exit criteria:
 - generated ISA size is bounded,
 - runtime is acceptable for `seq=8`.
 
+Remaining:
+
+- full GPT-2-sized `768x3072` and `3072x768` software/mgpu tests,
+- end-to-end GPT-2 linear execution.
+
 ### Phase E: Model-wide memory planning
+
+Status: **not started for GPT-2**
 
 Use the lifetime-aware planner for:
 
@@ -195,6 +224,8 @@ Exit criteria:
 
 ### Phase F: Autoregressive loop
 
+Status: **not started**
+
 Implement:
 
 - prompt encoding,
@@ -216,6 +247,8 @@ Exit criteria:
 - KV cache grows without corrupting previous tokens.
 
 ### Phase G: Numerical and performance gates
+
+Status: **not started**
 
 Implement:
 
