@@ -46,6 +46,7 @@ class Driver:
         *,
         name: str | None = None,
         alignment: int = 4096,
+        dtype: str = "f32",
     ) -> Buffer:
         if self._cursor > 0:
             self._cursor = ((self._cursor + alignment - 1) // alignment) * alignment
@@ -57,20 +58,17 @@ class Driver:
             raise DriverError(f"buffer {name!r} already exists")
 
         shape_tuple = tuple(shape)
-        numel = 1
-        for dim in shape_tuple:
-            if dim < 0:
-                raise DriverError(f"invalid buffer shape: {shape_tuple!r}")
-            numel *= dim
-        if self._cursor + numel * 4 > len(self.device.global_memory.data):
-            raise DriverError("out of simulated global memory")
-
         buffer = Buffer(
             self.device,
             name=name,
             base_addr=self._cursor,
             shape=shape_tuple,
+            dtype=dtype,
         )
+        if any(dim < 0 for dim in shape_tuple):
+            raise DriverError(f"invalid buffer shape: {shape_tuple!r}")
+        if self._cursor + buffer.nbytes > len(self.device.global_memory.data):
+            raise DriverError("out of simulated global memory")
         self._buffers[name] = buffer
         self._cursor = buffer.base_addr + buffer.nbytes
 

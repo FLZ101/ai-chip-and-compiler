@@ -135,6 +135,7 @@ class Device:
 
     global_memory: ByteMemory
     sms: list[SM]
+    register_count: int = 64
     grid_dim: tuple[int, ...] = (1,)
     block_dim: tuple[int, ...] = (1,)
     block_idx: tuple[int, ...] = (0,)
@@ -144,11 +145,12 @@ class Device:
     _cycle_global_bytes: int = field(default=0, init=False, repr=False)
     _cycle_shared_bytes: int = field(default=0, init=False, repr=False)
 
-    def run(self, program: Program) -> None:
+    def run(self, program: Program, *, reset_profile: bool = True) -> None:
         # One global cycle advances the deterministic timing model.  Each SM
         # has one scheduler issue slot per cycle; a warp is chosen round-robin
         # from the warps that are ready to issue.
-        self.profile = ProfileCounters()
+        if reset_profile:
+            self.profile = ProfileCounters()
         while True:
             self.clock += 1
             self._cycle_global_bytes = 0
@@ -317,8 +319,11 @@ class Device:
         self.profile.stalls.fetch += 1
 
 
-def _make_lanes(block_threads: int) -> list[LaneState]:
-    return [LaneState(lane_id=i) for i in range(block_threads)]
+def _make_lanes(block_threads: int, register_count: int = 64) -> list[LaneState]:
+    return [
+        LaneState(lane_id=i, regs=RegisterFile(count=register_count))
+        for i in range(block_threads)
+    ]
 
 
 def create_device(
@@ -326,6 +331,7 @@ def create_device(
     shared_size: int = 1 << 16,
     sm_count: int = 4,
     *,
+    register_count: int = 64,
     timing_model: TimingModel | None = None,
 ) -> Device:
     # The default sizes are intentionally small so tests run quickly.  The
@@ -336,6 +342,7 @@ def create_device(
             SM(sm_id=i, shared_memory=ByteMemory(shared_size, name=f"shared{i}"))
             for i in range(sm_count)
         ],
+        register_count=register_count,
         timing_model=timing_model or DEFAULT_TIMING_MODEL,
     )
 
@@ -348,45 +355,63 @@ def launch(
     block_dim: tuple[int, ...] = (1,),
     profile: bool = False,
 ) -> ProfileCounters | None:
-    # Launch dimensions are runtime values in a real GPU, but in the MVP they
-    # are function arguments.  Keeping them as tuples makes the eventual
-    # 1D/2D/3D grid handling straightforward.
     device.grid_dim = grid_dim
     device.block_dim = block_dim
     block_threads = math.prod(block_dim)
     total_blocks = math.prod(grid_dim)
-    if total_blocks > len(device.sms):
-        # A real GPU schedules blocks over time.  The MVP assigns at most one
-        # block per SM, which keeps control flow and memory visibility simple.
-        raise ValueError(
-            f"grid has {total_blocks} blocks but device only has {len(device.sms)} SMs"
-        )
+    if total_blocks <= 0:
+        raise ValueError("grid must contain at least one block")
 
-    for block_linear_id in range(total_blocks):
-        sm = device.sms[block_linear_id]
-        sm.warps = []
-        # A real GPU groups the threads of each block into 32-lane warps.  The
-        # final warp may be partially populated, and its active mask covers only
-        # the lanes that exist.
-        for warp_index in range(math.ceil(block_threads / 32)):
-            lane_count = min(32, block_threads - warp_index * 32)
-            lanes = _make_lanes(lane_count)
-            active_mask = (1 << lane_count) - 1
-            warp = WarpState(
+    sm_count = len(device.sms)
+    first_wave = True
+    for wave_start in range(0, total_blocks, sm_count):
+        blocks_this_wave = min(sm_count, total_blocks - wave_start)
+        for sm_index in range(sm_count):
+            sm = device.sms[sm_index]
+            if sm_index < blocks_this_wave:
+                block_linear_id = wave_start + sm_index
+                _populate_sm(
+                    sm,
+                    block_linear_id,
+                    block_threads,
+                    grid_dim,
+                    device.register_count,
+                )
+            else:
+                sm.warps = []
+                sm._block_idx = (0,) * len(grid_dim)  # type: ignore[attr-defined]
+                sm._block_linear_id = 0  # type: ignore[attr-defined]
+
+        device.run(program, reset_profile=first_wave)
+        first_wave = False
+
+    if profile:
+        return device.profile.snapshot()
+    return None
+
+
+def _populate_sm(
+    sm: SM,
+    block_linear_id: int,
+    block_threads: int,
+    grid_dim: tuple[int, ...],
+    register_count: int,
+) -> None:
+    """Install one block's warps and special-register metadata on ``sm``."""
+    sm.warps = []
+    for warp_index in range(math.ceil(block_threads / 32)):
+        lane_count = min(32, block_threads - warp_index * 32)
+        lanes = _make_lanes(lane_count, register_count)
+        active_mask = (1 << lane_count) - 1
+        sm.warps.append(
+            WarpState(
                 warp_id=warp_index,
                 lanes=lanes,
                 active_mask=active_mask,
             )
-            sm.warps.append(warp)
-        # Record the block this SM is executing.  Special register evaluation
-        # uses these values to derive global thread IDs.
-        sm._block_idx = _unflatten_index(block_linear_id, grid_dim)  # type: ignore[attr-defined]
-        sm._block_linear_id = block_linear_id  # type: ignore[attr-defined]
-
-    device.run(program)
-    if profile:
-        return device.profile.snapshot()
-    return None
+        )
+    sm._block_idx = _unflatten_index(block_linear_id, grid_dim)  # type: ignore[attr-defined]
+    sm._block_linear_id = block_linear_id  # type: ignore[attr-defined]
 
 
 def _unflatten_index(index: int, shape: tuple[int, ...]) -> tuple[int, ...]:

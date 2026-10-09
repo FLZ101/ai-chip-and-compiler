@@ -222,15 +222,21 @@ Exit criteria:
 - `global_size`, `shared_size`, `sm_count`, register count configurable.
 - Tests cover non-default resource sizes and occupancy errors.
 
+Status: **implemented**
+
 ### M2: Wave block scheduler
 
 - Grids larger than SM count run correctly.
 - Elementwise and conv tests with `grid > sm_count` pass.
 
+Status: **implemented**
+
 ### M3: Typed runtime memory
 
 - Typed buffers and allocator pass round-trip tests.
 - Free/reuse and alignment pass.
+
+Status: **implemented**
 
 ### M4: Real CNN execution
 
