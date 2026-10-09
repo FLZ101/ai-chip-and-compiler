@@ -11,6 +11,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -178,6 +179,9 @@ struct MGpuToIsaPass
     : public PassWrapper<MGpuToIsaPass, OperationPass<func::FuncOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MGpuToIsaPass)
 
+  MGpuToIsaPass() = default;
+  MGpuToIsaPass(const MGpuToIsaPass &pass) : PassWrapper(pass) {}
+
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect, linalg::LinalgDialect,
                     math::MathDialect, memref::MemRefDialect,
@@ -188,6 +192,12 @@ struct MGpuToIsaPass
   StringRef getDescription() const final {
     return "Emit simulator ISA for supported mgpu launches";
   }
+
+  Option<bool> emitAttentionScore{
+      *this, "emit-attention-score",
+      llvm::cl::desc(
+          "Emit only the tiled attention score stage for rank-4 attention"),
+      llvm::cl::init(false)};
 
   void runOnOperation() override {
     bufferMap = BufferMap::build(getOperation());
@@ -3243,6 +3253,28 @@ struct MGpuToIsaPass
                             sharedOffset);
   }
 
+  static void emitStoreTileToSharedReg(llvm::raw_ostream &os, int sourceBase,
+                                       int rowGroup, int colGroup,
+                                       int baseReg, int64_t sharedOffset) {
+    os << "MOV R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MOV R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "MUL R28, R26, 16\n"
+       << "ADD R28, R28, R27\n"
+       << "MUL R28, R28, 4\n"
+       << "ADD R28, R28, " << sharedOffset << "\n"
+       << "ADD R28, R28, R" << baseReg << "\n"
+       << "STS [R28], R" << sourceBase << "\n";
+  }
+
+  static void emitStoreFullTileReg(llvm::raw_ostream &os, int sourceBase,
+                                   int baseReg, int64_t sharedOffset) {
+    for (int slot = 0; slot < 8; ++slot)
+      emitStoreTileToSharedReg(os, sourceBase + slot, slot / 4, slot % 4,
+                               baseReg, sharedOffset);
+  }
+
   static void emitStoreSharedFragment(llvm::raw_ostream &os, int source,
                                       int rowGroup, int colGroup,
                                       int64_t offset) {
@@ -3959,19 +3991,21 @@ struct MGpuToIsaPass
 
   static void emitAttentionQFragmentTiled(
       llvm::raw_ostream &os, int dest, int rowGroup, int colGroup,
-      int64_t qBase, int64_t seq, int64_t dim, int64_t rowOffset,
-      int64_t colOffset) {
-    os << "MOV R26, " << rowOffset << "\n"
+      int64_t qBase, int64_t seq, int64_t dim, int rowTileReg,
+      int colTileReg) {
+    os << "MOV R26, R" << rowTileReg << "\n"
+       << "MUL R26, R26, 16\n"
        << "ADD R26, R26, " << (rowGroup * 8) << "\n"
        << "ADD R26, R26, R24\n"
-       << "MOV R27, " << colOffset << "\n"
+       << "MOV R27, R" << colTileReg << "\n"
+       << "MUL R27, R27, 16\n"
        << "ADD R27, R27, " << (colGroup * 4) << "\n"
        << "ADD R27, R27, R25\n"
        << "MOV R39, " << seq << "\n"
        << "CMP.LT R28, R26, R39\n"
        << "MOV R39, " << dim << "\n"
-       << "CMP.LT R40, R27, R39\n"
-       << "MUL R28, R28, R40\n"
+       << "CMP.LT R38, R27, R39\n"
+       << "MUL R28, R28, R38\n"
        << "MOV R39, " << (seq - 1) << "\n"
        << "MIN R29, R26, R39\n"
        << "MOV R39, " << (dim - 1) << "\n"
@@ -4014,19 +4048,21 @@ struct MGpuToIsaPass
 
   static void emitAttentionKTransposeFragmentTiled(
       llvm::raw_ostream &os, int dest, int rowGroup, int colGroup,
-      int64_t kBase, int64_t seq, int64_t dim, int64_t rowOffset,
-      int64_t colOffset) {
-    os << "MOV R26, " << rowOffset << "\n"
+      int64_t kBase, int64_t seq, int64_t dim, int rowTileReg,
+      int colTileReg) {
+    os << "MOV R26, R" << rowTileReg << "\n"
+       << "MUL R26, R26, 16\n"
        << "ADD R26, R26, " << (rowGroup * 8) << "\n"
        << "ADD R26, R26, R24\n"
-       << "MOV R27, " << colOffset << "\n"
+       << "MOV R27, R" << colTileReg << "\n"
+       << "MUL R27, R27, 16\n"
        << "ADD R27, R27, " << (colGroup * 4) << "\n"
        << "ADD R27, R27, R25\n"
        << "MOV R39, " << dim << "\n"
        << "CMP.LT R28, R26, R39\n"
        << "MOV R39, " << seq << "\n"
-       << "CMP.LT R40, R27, R39\n"
-       << "MUL R28, R28, R40\n"
+       << "CMP.LT R38, R27, R39\n"
+       << "MUL R28, R28, R38\n"
        << "MOV R39, " << (dim - 1) << "\n"
        << "MIN R29, R26, R39\n"
        << "MOV R39, " << (seq - 1) << "\n"
@@ -4145,6 +4181,68 @@ struct MGpuToIsaPass
          << "MOV R7, -1000000000.0\n"
          << "SEL R2, R6, R7, R2\n";
     }
+  }
+
+  std::optional<IsaText> emitTiledAttentionScoreIsa(mgpu::AttentionOp attention) {
+    auto qType = dyn_cast<MemRefType>(attention.getQ().getType());
+    auto kType = dyn_cast<MemRefType>(attention.getK().getType());
+    if (!qType || !kType || qType.getRank() != 4 || kType.getRank() != 4)
+      return std::nullopt;
+
+    int64_t batch = qType.getShape()[0];
+    int64_t heads = qType.getShape()[1];
+    int64_t seq = qType.getShape()[2];
+    int64_t dim = qType.getShape()[3];
+    if (batch != 1 || heads != 1)
+      return std::nullopt;
+    if (kType.getShape()[2] != seq || kType.getShape()[3] != dim)
+      return std::nullopt;
+    if (seq <= 0 || dim <= 0)
+      return std::nullopt;
+
+    int64_t qTiles = (seq + 15) / 16;
+    int64_t kTiles = (seq + 15) / 16;
+    int64_t dTiles = (dim + 15) / 16;
+    int64_t qBase = bufferMap.base(attention.getQ());
+    int64_t kBase = bufferMap.base(attention.getK());
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitLaneIndex(os);
+    emitQueryTileLoopStart(os, qTiles, "query_tile_end");
+    emitKeyTileLoopStart(os, kTiles, "key_tile_end");
+    emitZeroTile(os, 16);
+    emitDimTileLoopStart(os, dTiles, "dim_tile_end");
+
+    for (int slot = 0; slot < 8; ++slot) {
+      emitAttentionQFragmentTiled(os, slot, slot / 4, slot % 4, qBase, seq,
+                                  dim, 40, 46);
+      emitAttentionKTransposeFragmentTiled(os, 8 + slot, slot / 4, slot % 4,
+                                           kBase, seq, dim, 46, 43);
+    }
+
+    emitMmaAccumulate(os, 16, 0, 8, 16);
+    emitDimTileLoopEnd(os, "dim_tile_end");
+
+    // Compute the byte offset of the current (query,key) score tile in the
+    // shared-memory tile array: (q * kTiles + k) * 16 * 16 * 4.
+    os << "MOV R48, R40\n"
+       << "MUL R48, R48, " << kTiles << "\n"
+       << "ADD R48, R48, R43\n"
+       << "MUL R48, R48, 1024\n";
+    emitStoreFullTileReg(os, 16, 48, 0);
+    os << "BAR.SYNC\n";
+
+    emitKeyTileLoopEnd(os, "key_tile_end");
+    emitQueryTileLoopEnd(os, "query_tile_end");
+    os << "EXIT\n";
+    os.flush();
+
+    IsaText result;
+    result.code = code;
+    result.grid = "1x1x1";
+    result.block = "32x1x1";
+    return result;
   }
 
   std::optional<IsaText> emitScalarAttentionIsa(mgpu::AttentionOp attention) {
@@ -4363,6 +4461,10 @@ struct MGpuToIsaPass
       return std::nullopt;
     if (qType.getRank() == 4 && kType.getRank() == 4 &&
         vType.getRank() == 4 && outputType.getRank() == 4) {
+      if (emitAttentionScore) {
+        if (auto scoreIsa = emitTiledAttentionScoreIsa(attention))
+          return scoreIsa;
+      }
       int64_t seq = qType.getShape()[2];
       int64_t dim = qType.getShape()[3];
       if (seq > 16 || dim > 16)
