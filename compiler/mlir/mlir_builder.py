@@ -192,6 +192,8 @@ class MLIRBuilder:
             return self._emit_norm_detection_placeholder(node, result_name, indent)
         if node.op == Op.SOFTMAX:
             return self._emit_softmax(node, result_name, indent)
+        if node.op == Op.MASKED_SOFTMAX:
+            return self._emit_masked_softmax(node, result_name, indent)
         if node.op == Op.LAYER_NORM:
             return self._emit_layer_norm(node, result_name, indent)
         if node.op == Op.RMS_NORM:
@@ -701,6 +703,22 @@ class MLIRBuilder:
         return [
             f"{indent}mgpu.softmax {self._value_names[value.name]}, "
             f"{result_name} : {self._memref_type(value)}, "
+            f"{self._memref_type(output)}"
+        ]
+
+    def _emit_masked_softmax(
+        self, node: Node, result_name: str, indent: str
+    ) -> list[str]:
+        logits, mask = node.inputs
+        output = node.outputs[0]
+        if logits.rank != 2 or mask.shape != logits.shape or output.rank != 2:
+            raise MLIRBuilderError(
+                "masked softmax lowering currently supports rank-2 logits/mask"
+            )
+        return [
+            f"{indent}mgpu.masked_softmax {self._value_names[logits.name]}, "
+            f"{self._value_names[mask.name]}, {result_name} : "
+            f"{self._memref_type(logits)}, {self._memref_type(mask)}, "
             f"{self._memref_type(output)}"
         ]
 

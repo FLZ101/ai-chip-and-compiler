@@ -323,6 +323,14 @@ struct MGpuToIsaPass
             StringAttr::get(&getContext(), isa->grid),
             StringAttr::get(&getContext(), isa->block));
         rewriter.eraseOp(launch);
+      } else if (auto isa = emitMaskedSoftmaxIsa(launch)) {
+        rewriter.setInsertionPoint(launch);
+        rewriter.create<mgpu::IsaOp>(
+            launch.getLoc(),
+            StringAttr::get(&getContext(), isa->code),
+            StringAttr::get(&getContext(), isa->grid),
+            StringAttr::get(&getContext(), isa->block));
+        rewriter.eraseOp(launch);
       } else if (auto isa = emitLayerNormIsa(launch)) {
         rewriter.setInsertionPoint(launch);
         rewriter.create<mgpu::IsaOp>(
@@ -1458,6 +1466,114 @@ struct MGpuToIsaPass
          << "ADD R2, R2, " << outBase << "\n"
          << "STG [R2], R5\n";
     }
+    emitCnnFinish(os);
+    os.flush();
+
+    IsaText isa;
+    isa.code = code;
+    isa.grid = std::to_string((rows + 31) / 32) + "x1x1";
+    isa.block = "32x1x1";
+    return isa;
+  }
+
+  std::optional<IsaText> emitMaskedSoftmaxIsa(mgpu::LaunchOp launch) {
+    SmallVector<mgpu::MaskedSoftmaxOp> ops;
+    launch.getBody().front().walk(
+        [&](mgpu::MaskedSoftmaxOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return std::nullopt;
+
+    auto op = ops.front();
+    auto xType = dyn_cast<MemRefType>(op.getX().getType());
+    auto maskType = dyn_cast<MemRefType>(op.getMask().getType());
+    auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!xType || !maskType || !outType || xType.getRank() != 2 ||
+        maskType.getRank() != 2 || outType.getRank() != 2)
+      return std::nullopt;
+    if (xType.getShape() != maskType.getShape())
+      return std::nullopt;
+    int64_t rows = xType.getShape()[0];
+    int64_t dim = xType.getShape()[1];
+    int64_t xBase = bufferMap.base(op.getX());
+    int64_t maskBase = bufferMap.base(op.getMask());
+    int64_t outBase = bufferMap.base(op.getOutput());
+
+    std::string code;
+    llvm::raw_string_ostream os(code);
+    emitCnnPrologue(os, rows);
+
+    os << "MOV R20, -1000000000.0\n";
+    for (int64_t d = 0; d < dim; ++d) {
+      os << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << xBase << "\n"
+         << typedLoadOpcode(xType) << " R4, [R2]\n"
+         << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << maskBase << "\n"
+         << typedLoadOpcode(maskType) << " R5, [R2]\n"
+         << "CMP.EQ R6, R5, 0\n"
+         << "MOV R7, -1000000000.0\n"
+         << "SEL R4, R6, R7, R4\n"
+         << "MAX R20, R20, R4\n";
+    }
+
+    os << "MOV R21, 0\n";
+    for (int64_t d = 0; d < dim; ++d) {
+      os << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << xBase << "\n"
+         << typedLoadOpcode(xType) << " R4, [R2]\n"
+         << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << maskBase << "\n"
+         << typedLoadOpcode(maskType) << " R5, [R2]\n"
+         << "CMP.EQ R6, R5, 0\n"
+         << "MOV R7, -1000000000.0\n"
+         << "SEL R4, R6, R7, R4\n"
+         << "SUB R4, R4, R20\n"
+         << "MUL R4, R4, 1.4426950408889634\n"
+         << "EXP2 R5, R4\n"
+         << "ADD R21, R21, R5\n";
+    }
+
+    for (int64_t d = 0; d < dim; ++d) {
+      os << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << xBase << "\n"
+         << typedLoadOpcode(xType) << " R4, [R2]\n"
+         << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << maskBase << "\n"
+         << typedLoadOpcode(maskType) << " R5, [R2]\n"
+         << "CMP.EQ R6, R5, 0\n"
+         << "MOV R7, -1000000000.0\n"
+         << "SEL R4, R6, R7, R4\n"
+         << "SUB R4, R4, R20\n"
+         << "MUL R4, R4, 1.4426950408889634\n"
+         << "EXP2 R5, R4\n"
+         << "RCP R6, R21\n"
+         << "MUL R5, R5, R6\n"
+         << "MOV R2, " << dim << "\n"
+         << "MUL R2, R0, R2\n"
+         << "ADD R2, R2, " << d << "\n"
+         << "MUL R2, R2, 4\n"
+         << "ADD R2, R2, " << outBase << "\n"
+         << typedStoreOpcode(outType) << " [R2], R5\n";
+    }
+
     emitCnnFinish(os);
     os.flush();
 

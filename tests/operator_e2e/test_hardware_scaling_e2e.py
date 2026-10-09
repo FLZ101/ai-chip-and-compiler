@@ -209,6 +209,29 @@ class TestHardwareScalingEndToEnd(unittest.TestCase):
         )
         self.assertIn("linear_loop", result.isa_text)
 
+    def test_masked_softmax_runs_in_simulator(self):
+        logits = np.asarray([[1.0, 2.0, 3.0], [-1.0, 0.0, 1.0]], np.float32)
+        mask = np.asarray([[1.0, 1.0, 0.0], [1.0, 0.0, 1.0]], np.float32)
+        shifted = np.where(mask == 0, -1e30, logits)
+        shifted = shifted - np.max(shifted, axis=1, keepdims=True)
+        exp = np.exp(shifted)
+        expected = exp / np.sum(exp, axis=1, keepdims=True)
+
+        frontend = ManualFrontend("masked_softmax")
+        x = frontend.add_input("x", DType.F32, logits.shape)
+        m = frontend.add_input("mask", DType.F32, mask.shape)
+        frontend.output(frontend.masked_softmax(x, m))
+
+        result = run_operator_e2e(
+            create_device(global_size=1 << 20, sm_count=4),
+            frontend.build(),
+            {"x": logits, "mask": mask},
+            [expected],
+            lowering=lower_kernel,
+            atol=1e-5,
+        )
+        self.assertIn("mgpu.masked_softmax", result.mlir_text)
+
 
 if __name__ == "__main__":
     unittest.main()

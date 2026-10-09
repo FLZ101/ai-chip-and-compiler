@@ -188,6 +188,20 @@ def MGPU_SoftmaxOp : MGPU_Op<"softmax", [MemoryEffects<[MemRead, MemWrite]>]> {
   let assemblyFormat = "$x `,` $output attr-dict `:` type($x) `,` type($output)";
 }
 
+def MGPU_MaskedSoftmaxOp
+    : MGPU_Op<"masked_softmax", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Masked row-wise softmax";
+  let arguments = (ins AnyMemRef:$x,
+                       AnyMemRef:$mask,
+                       AnyMemRef:$output);
+  let results = (outs);
+  let assemblyFormat = [{
+    $x `,` $mask `,` $output
+    attr-dict
+    `:` type($x) `,` type($mask) `,` type($output)
+  }];
+}
+
 def MGPU_LayerNormOp : MGPU_Op<"layer_norm", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "Layer normalization";
   let arguments = (ins AnyMemRef:$x,

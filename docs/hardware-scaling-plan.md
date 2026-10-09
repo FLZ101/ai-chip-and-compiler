@@ -260,8 +260,8 @@ codegen scalability**
 - GPT-2-small or Pythia-70M runs a short greedy decode loop.
 - Generated token IDs match PyTorch.
 
-Status: **component execution implemented; full greedy decode pending
-multi-head attention**
+Status: **component execution and masked softmax implemented; full greedy
+decode pending multi-head attention**
 
 ## 6. Risks and decisions
 
