@@ -5,6 +5,9 @@ operator-sized tests to real CNN and small-LLM workloads.  It is the
 implementation plan for the "Hardware scaling" section in
 [next-stage-steps.md](next-stage-steps.md).
 
+The focused follow-up plan for a real pretrained GPT-2-small decode loop is in
+[gpt2-small-run-plan.md](gpt2-small-run-plan.md).
+
 ## 1. Goal
 
 Run the already-imported real models end to end:

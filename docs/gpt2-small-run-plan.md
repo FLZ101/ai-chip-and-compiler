@@ -1,0 +1,240 @@
+# GPT-2-Small Full Execution Plan
+
+This document defines the remaining work to run a real pretrained GPT-2-small
+decoder in the simulator and compare greedy token IDs with PyTorch.
+
+## 1. Goal
+
+Run this exact path:
+
+```text
+input_ids (1 x seq)
+  -> token embedding
+  -> positional embedding
+  -> 12 x GPT-2 transformer block
+  -> final LayerNorm
+  -> lm_head Linear
+  -> argmax
+  -> next token id
+```
+
+The first milestone is a short static sequence, e.g. `seq = 8`, with
+`use_cache=False`.  KV-cache decoding is a follow-up milestone.
+
+## 2. Current state
+
+Already available:
+
+- GPT-2-small checkpoint download/caching.
+- torch-mlir import and canonicalization of a single GPT-2 block.
+- simulator execution of pretrained LayerNorm.
+- general `Linear` lowering.
+- masked softmax lowering.
+- typed runtime buffers and lifetime-aware memory planner.
+- wave block scheduler and runtime launch queue.
+- INT8/INT4/FP8 typed memory and quantized matmul support.
+
+Missing for full GPT-2:
+
+- full-module import with `use_cache=False` and static sequence,
+- token/position embedding lowering,
+- multi-head attention,
+- large matmul/linear execution,
+- model-wide memory plan and KV-cache planning,
+- argmax/token selection,
+- autoregressive loop orchestration.
+
+## 3. Target sizes
+
+GPT-2-small:
+
+- vocab: `50257`
+- hidden: `768`
+- heads: `12`
+- layers: `12`
+- head dim: `64`
+- max context: `1024`
+
+At `seq = 8`, FP32:
+
+- weights: ~500 MB
+- activations: tens of MB
+- KV cache later: `2 * 12 * seq * 64 * 4` bytes per token step
+
+## 4. Phases
+
+### Phase A: Import a static full model
+
+Implement:
+
+- export/import full `GPT2LMHeadModel` with
+  `example_kwargs={"use_cache": False}`,
+- canonicalize to `linalg-on-tensors`,
+- verify the module,
+- freeze input to `1 x seq`.
+
+Files:
+
+- `compiler/mlir/importer.py`
+- `compiler/mlir/canonicalizer.py`
+- `tests/model_e2e/test_real_pretrained_llm.py`
+
+Exit criteria:
+
+- full GPT-2-small canonicalizes without `torch.aten`,
+- canonicalized module verifies,
+- test is deterministic and skips offline.
+
+### Phase B: Model IR coverage for GPT-2 ops
+
+Add or complete Model IR / target ops:
+
+- embedding gather,
+- positional add/broadcast,
+- reshape/transpose/split,
+- multi-head attention decomposition,
+- final `Linear`,
+- `argmax`.
+
+Files:
+
+- `compiler/model_ir.py`
+- `compiler/frontends/manual_frontend.py`
+- `compiler/mlir/mlir_builder.py`
+- `mlir/mgpu/include/mgpu/MGPUOps.td`
+- `mlir/mgpu/lib/mgpu/MGpuToIsaPass.cpp`
+
+Exit criteria:
+
+- every op in the GPT-2 forward graph has a target lowering,
+- unsupported ops fail with op/shape/dtype diagnostics.
+
+### Phase C: Multi-head attention
+
+Implement a decomposed attention path:
+
+```text
+q,k,v projections
+  -> split into (batch, heads, seq, head_dim)
+  -> q @ k^T
+  -> scale
+  -> causal mask + masked softmax
+  -> attn @ v
+  -> merge heads
+  -> output projection
+```
+
+First use scalar/grid-aware matmul.  Add `mgpu.mma` as an optimization later.
+
+Files:
+
+- `mlir/mgpu/lib/mgpu/MGpuToIsaPass.cpp`
+- `compiler/mlir/mlir_builder.py`
+- `tests/operator_e2e/test_attention_kernels_e2e.py`
+
+Exit criteria:
+
+- `batch=1`, `heads=12`, `seq<=16`, `head_dim=64` attention matches PyTorch,
+- causal mask produces correct triangular attention,
+- ISA uses bounded loops rather than unrolled head dimensions.
+
+### Phase D: Large linear/matmul execution
+
+Generalize the existing `Linear` and scalar matmul paths:
+
+- grid over all output elements,
+- loop over `k`,
+- wave execution over SMs,
+- optional tiled MMA when shapes align.
+
+Files:
+
+- `mlir/mgpu/lib/mgpu/MGpuToIsaPass.cpp`
+- `tests/operator_e2e/test_hardware_scaling_e2e.py`
+
+Exit criteria:
+
+- `768x768` and `768x3072` linear layers run correctly,
+- generated ISA size is bounded,
+- runtime is acceptable for `seq=8`.
+
+### Phase E: Model-wide memory planning
+
+Use the lifetime-aware planner for:
+
+- embeddings,
+- block weights,
+- activations,
+- final logits,
+- KV cache in the cache-decode milestone.
+
+Files:
+
+- `runtime/memory_plan.py`
+- `compiler/mlir/mgpu_runner.py`
+- `runtime/driver.py`
+
+Exit criteria:
+
+- peak memory fits configured global memory,
+- memory plan is deterministic and reproducible,
+- planner reports total and peak bytes.
+
+### Phase F: Autoregressive loop
+
+Implement:
+
+- prompt encoding,
+- repeated one-token decode steps,
+- `argmax` token selection,
+- KV cache append/gather after Phase C,
+- run several steps and collect token IDs.
+
+Files:
+
+- `runtime/driver.py`
+- `examples/transformer/autoregressive_loop.py`
+- `tests/model_e2e/test_real_llm_decode.py`
+
+Exit criteria:
+
+- generated token IDs match PyTorch greedy decode,
+- each step uses the runtime launch queue,
+- KV cache grows without corrupting previous tokens.
+
+### Phase G: Numerical and performance gates
+
+Implement:
+
+- comparison against PyTorch for logits, attention, and token IDs,
+- cycle/profile checks,
+- a cropped smoke test and an opt-in full test,
+- tolerances documented in `docs/tolerances.md`.
+
+Files:
+
+- `tests/model_e2e/`
+- `docs/tolerances.md`
+
+Exit criteria:
+
+- full static `seq=8` forward matches PyTorch,
+- greedy decode matches PyTorch token IDs,
+- pre-commit, unittest, and lit are green.
+
+## 5. Risks
+
+- **Multi-head attention complexity.**  This is the largest remaining
+  lowering task.  Decompose before optimizing.
+- **Memory size.**  FP32 GPT-2 weights are large.  Use typed storage or
+  FP16/BF16 after correctness.
+- **Python simulator speed.**  Keep the first gate at `seq=8` and
+  `sm_count` large enough for waves; optimize only after correctness.
+- **Function-boundary bufferization.**  Full canonicalized modules may need
+  explicit `one-shot-bufferize` options before map-to-mgpu.
+
+## 6. Deliverable
+
+`tests/model_e2e/test_real_llm_decode.py` runs a real pretrained GPT-2-small
+forward and greedy decode loop in the simulator and compares generated token
+IDs with PyTorch.
