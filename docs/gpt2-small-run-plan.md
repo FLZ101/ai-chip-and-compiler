@@ -46,17 +46,38 @@ Already available:
   causal masks.
 - GPT-2-sized software linear tests for `8x768 -> 8x3072` and
   `8x3072 -> 8x768`.
+- static `tm_tensor.scan` lowering to `linalg.matmul`.
+- initial `linalg.generic` lowering for integer casts, fills, compares,
+  selects, and selected float/reduction patterns.
 - mgpu-vs-software differential tests for the supported operators.
 
 Missing for full GPT-2:
 
-- full-module import with `use_cache=False` and static sequence,
-- token/position embedding lowering,
-- generalized mgpu multi-head attention for `heads=12` and `head_dim=64`,
-- software embedding/gather and argmax operators,
-- large matmul/linear execution,
-- model-wide memory plan and KV-cache planning,
-- autoregressive loop orchestration.
+- wire pretrained weights into the full Model IR graph and validate it against
+  PyTorch,
+- complete the native software execution path for all GPT-2 graph nodes,
+- full static `seq=8` forward through the software operator runner,
+- greedy autoregressive loop orchestration,
+- numerical token/logit gates against PyTorch.
+
+## 2.1 Execution strategy
+
+Use a **software-first** execution strategy for full GPT-2:
+
+```text
+full GPT-2 Model IR
+  -> native software operator runner (fast path)
+  -> PyTorch numerical gates
+
+mgpu / ISA path
+  -> per-operator correctness oracle on cropped shapes
+  -> bounded lowering and lit tests
+```
+
+The full GPT-2 graph and decode loop are executed with the existing native
+software kernels plus Python/NumPy fallbacks. The `mgpu-opt`/simulator path is
+used to validate each operator where shapes are supported, but full
+GPT-2-sized `mgpu-to-isa` execution is not a correctness prerequisite.
 
 ## 3. Target sizes
 
@@ -125,7 +146,8 @@ Files:
 
 Exit criteria:
 
-- every op in the GPT-2 forward graph has a target lowering,
+- every op in the GPT-2 forward graph has either an mgpu lowering or a
+  software operator fallback,
 - unsupported ops fail with op/shape/dtype diagnostics.
 - every software kernel has a differential test against its mgpu
   implementation where the mgpu shape is supported.
@@ -133,7 +155,7 @@ Exit criteria:
 Remaining:
 
 - wire pretrained weights into the full Model IR graph and validate the
-  resulting graph against PyTorch.
+  resulting software execution against PyTorch.
 
 ### Phase C: Multi-head attention
 
@@ -229,9 +251,11 @@ Exit criteria:
 
 The test builds an explicit GPT-2-sized buffer plan for embeddings, all 12
 transformer-block weights, activations, final logits, and the KV cache. Full
-module-level plan injection now passes bufferization; the remaining blocker is
-unsupported `arith.index_cast`/`linalg.generic` lowering during
-`map-to-mgpu`/`mgpu-to-isa`.
+module-level plan injection now passes bufferization after `tm_tensor.scan`
+and the initial `linalg.generic` pattern lowering work. It is still not the
+primary full-model execution path: remaining fused reductions such as
+softmax/argmax are lower priority than completing the software operator
+runner.
 
 ### Phase F: Autoregressive loop
 
@@ -243,7 +267,8 @@ Implement:
 - repeated one-token decode steps,
 - `argmax` token selection,
 - KV cache append/gather after Phase C,
-- run several steps and collect token IDs.
+- run several steps through the software operator runner and collect token
+  IDs.
 
 Files:
 
@@ -253,7 +278,8 @@ Files:
 
 Exit criteria:
 
-- generated token IDs match PyTorch greedy decode,
+- generated token IDs match PyTorch greedy decode through the software
+  operator runner,
 - each step uses the runtime launch queue,
 - KV cache grows without corrupting previous tokens.
 
@@ -263,8 +289,9 @@ Status: **not started**
 
 Implement:
 
-- comparison against PyTorch for logits, attention, and token IDs,
-- cycle/profile checks,
+- comparison against PyTorch for logits, attention, and token IDs on the
+  software operator path,
+- cycle/profile checks for mgpu operator gates where supported,
 - a cropped smoke test and an opt-in full test,
 - tolerances documented in `docs/tolerances.md`.
 
@@ -275,23 +302,27 @@ Files:
 
 Exit criteria:
 
-- full static `seq=8` forward matches PyTorch,
+- full static `seq=8` software operator forward matches PyTorch,
 - greedy decode matches PyTorch token IDs,
 - pre-commit, unittest, and lit are green.
 
 ## 5. Risks
 
 - **Multi-head attention complexity.**  This is the largest remaining
-  lowering task.  Decompose before optimizing.
+  lowering task. The software attention path is the full-model workhorse;
+  mgpu attention remains a cropped correctness oracle.
 - **Memory size.**  FP32 GPT-2 weights are large.  Use typed storage or
   FP16/BF16 after correctness.
 - **Python simulator speed.**  Keep the first gate at `seq=8` and
-  `sm_count` large enough for waves; optimize only after correctness.
+  prefer the native software operator runner for full-model execution;
+  optimize mgpu execution only after correctness.
 - **Function-boundary bufferization.**  Full canonicalized modules may need
-  explicit `one-shot-bufferize` options before map-to-mgpu.
+  explicit `one-shot-bufferize` options before map-to-mgpu. Explicit software
+  buffer planning avoids this dependency for the first full-model gate.
 
 ## 6. Deliverable
 
 `tests/model_e2e/test_real_llm_decode.py` runs a real pretrained GPT-2-small
-forward and greedy decode loop in the simulator and compares generated token
-IDs with PyTorch.
+forward and greedy decode loop through the software operator runner and
+compares generated token IDs with PyTorch. mgpu operator tests remain the
+correctness oracle for individual supported kernels.
