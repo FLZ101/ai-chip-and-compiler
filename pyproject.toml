@@ -26,6 +26,7 @@ frameworks = [
   "torch>=2.14",
   "torchvision>=0.29",
   "torch-mlir>=2026.0",
+  "transformers>=4.46",
 ]
 hardware = [
   "pyrtl>=1.0",
@@ -42,6 +43,7 @@ dev = [
   "torch>=2.14",
   "torchvision>=0.29",
   "torch-mlir>=2026.0",
+  "transformers>=4.46",
   "pyrtl>=1.0",
   "amaranth>=0.5",
   "cocotb>=2.0",

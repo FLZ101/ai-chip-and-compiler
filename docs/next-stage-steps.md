@@ -647,6 +647,9 @@ and resident-block scheduling.
 
 ### 6.7 Real small LLM target
 
+Status: **import/canonicalization done; full greedy decode pending hardware
+scaling**
+
 Target order:
 
 1. `Pythia-70M`
@@ -667,6 +670,14 @@ Steps:
 Tests:
 
 - `tests/model_e2e/test_real_llm_decode.py`
+- `tests/model_e2e/test_real_pretrained_llm.py`
+
+GPT-2 small weights can be downloaded with
+`scripts/download_real_models.py --model gpt2-small`.  The importer test loads
+a real pretrained GPT-2 transformer block, imports it with torch-mlir, and
+canonicalizes it to `linalg-on-tensors`.  Running a complete autoregressive
+decode loop in the functional simulator is deferred until the hardware
+scaling work is complete.
 
 ---
 
