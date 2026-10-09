@@ -616,6 +616,9 @@ Tests: `tests/model_e2e/test_real_autoregressive.py`
 
 ### 6.6 Real CNN target
 
+Status: **import/canonicalization done; full simulator execution pending
+hardware scaling**
+
 Target:
 
 - `MobileNetV3-Small` or `ResNet18`
@@ -633,6 +636,14 @@ Steps:
 Tests:
 
 - `tests/model_e2e/test_real_cnn.py`
+- `tests/model_e2e/test_real_pretrained_cnn.py`
+
+The pretrained ResNet18 checkpoint can be downloaded with
+`scripts/download_real_models.py`.  The importer/canonicalizer test verifies
+that the full 224x224 model lowers to `linalg-on-tensors` and still verifies
+in MLIR.  Executing the complete model in the functional simulator is
+deliberately deferred until the simulator supports larger memory, more SMs,
+and resident-block scheduling.
 
 ### 6.7 Real small LLM target
 
