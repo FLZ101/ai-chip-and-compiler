@@ -46,6 +46,7 @@ REGISTER_DEST_OPS = {
     # four eight-register fragment blocks and is executed warp-wide by the
     # simulator.
     "MMA",
+    "MMA.I8",
     # Unary ALU operations.
     "NEG",
     "ABS",

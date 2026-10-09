@@ -48,6 +48,14 @@ class TestIsaParser(unittest.TestCase):
             (Reg("R1"), Reg("R2"), Reg("R3")),
         )
 
+    def test_parse_int8_mma(self):
+        program = parse_asm("MMA.I8 R0, R1, R2, R3")
+        self.assertEqual(program[0].op, "MMA.I8")
+        self.assertEqual(
+            program[0].srcs,
+            (Reg("R1"), Reg("R2"), Reg("R3")),
+        )
+
     def test_parse_integer_division(self):
         program = parse_asm("IDIV R1, R2, R3")
         self.assertEqual(program[0].op, "IDIV")

@@ -255,7 +255,7 @@ class Device:
         warp.busy_until = self.clock + latency
         warp.last_issued_class = opcode_type
 
-        if instruction.op == "MMA":
+        if instruction.op in {"MMA", "MMA.I8"}:
             dst = instruction.dst
             if not isinstance(dst, Reg):
                 raise ValueError("MMA requires a register block destination")
@@ -457,7 +457,7 @@ def _mma_source_register_names(instruction: Instruction) -> set[str]:
     the operand.
     """
     sources: set[str] = set()
-    if instruction.op != "MMA" or len(instruction.srcs) != 3:
+    if instruction.op not in {"MMA", "MMA.I8"} or len(instruction.srcs) != 3:
         return sources
     for operand in instruction.srcs:
         if not isinstance(operand, Reg):
@@ -481,7 +481,7 @@ def _instruction_source_register_names(instruction: Instruction) -> set[str]:
         elif isinstance(operand, Mem) and operand.base not in SPECIAL_REGISTER_NAMES:
             sources.add(operand.base)
 
-    if instruction.op == "MMA":
+    if instruction.op in {"MMA", "MMA.I8"}:
         return _mma_source_register_names(instruction)
     if instruction.op in REGISTER_DEST_OPS or instruction.op in MEMORY_DEST_OPS:
         for operand in instruction.srcs:
@@ -915,7 +915,7 @@ def execute_warp(
     if op == "BRA":
         _execute_branch(device, sm, warp, instruction, program)
         return
-    if op == "MMA":
+    if op in {"MMA", "MMA.I8"}:
         _execute_mma(device, sm, warp, instruction)
         warp.pc += 1
         return

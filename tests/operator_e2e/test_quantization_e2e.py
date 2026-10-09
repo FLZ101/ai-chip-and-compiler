@@ -220,6 +220,36 @@ class TestQuantizationEndToEnd(unittest.TestCase):
         expected = a.astype(np.int32) @ b.astype(np.int32)
         np.testing.assert_array_equal(actual, expected)
 
+    def test_int8_tensor_core_matmul(self):
+        m = k = n = 16
+        result = run_mgpu_pipeline(_matmul_mlir("i8", "i8", "i32", m, k, n))
+        self.assertIn("MMA.I8", result.code)
+        a = (np.arange(m * k, dtype=np.int32) % 3 - 1).reshape(m, k)
+        b = (np.arange(k * n, dtype=np.int32) % 4 - 2).reshape(k, n)
+
+        device = create_device(global_size=1 << 20, sm_count=4)
+        a_bytes = m * k
+        b_bytes = k * n
+        for index, value in enumerate(a.reshape(-1).tolist()):
+            device.global_memory.write_i8(index, int(value))
+        for index, value in enumerate(b.reshape(-1).tolist()):
+            device.global_memory.write_i8(a_bytes + index, int(value))
+
+        launch(
+            device,
+            parse_asm(result.code),
+            grid_dim=result.grid,
+            block_dim=result.block,
+        )
+
+        output_base = a_bytes + b_bytes
+        actual = np.asarray(
+            [device.global_memory.read_i32(output_base + 4 * i) for i in range(m * n)],
+            dtype=np.int32,
+        ).reshape(m, n)
+        expected = a.astype(np.int32) @ b.astype(np.int32)
+        np.testing.assert_array_equal(actual, expected)
+
     def test_fp8_e4m3_matmul(self):
         m, k, n = 2, 3, 2
         result = run_mgpu_pipeline(_matmul_mlir("f8E4M3FN", "f8E4M3FN", "f32", m, k, n))

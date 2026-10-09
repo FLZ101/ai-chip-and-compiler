@@ -497,7 +497,8 @@ Tests:
 - INT8 matmul/conv match PTQ reference.
 
 Implemented as typed SIMT scalar matmul/conv fallbacks in
-`MGpuToIsaPass.cpp` with INT32 accumulation.  See
+`MGpuToIsaPass.cpp` with INT32 accumulation, plus a `MMA.I8`
+16x16x16 tensor-core path for integer matmul.  See
 `tests/operator_e2e/test_quantization_e2e.py`.
 
 ### 5.3 Add INT4/UINT4 unpack/dequant

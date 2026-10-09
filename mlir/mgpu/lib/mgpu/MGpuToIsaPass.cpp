@@ -2285,6 +2285,33 @@ struct MGpuToIsaPass
        << "STG [R26], R" << source << "\n";
   }
 
+  static void emitInt8FragmentLoad(llvm::raw_ostream &os, int dest,
+                                   int rowGroup, int colGroup, int64_t base,
+                                   int64_t stride) {
+    os << "MOV R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MUL R26, R26, " << stride << "\n"
+       << "MOV R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "ADD R26, R26, R27\n"
+       << "ADD R26, R26, " << base << "\n"
+       << "LDG.I8 R" << dest << ", [R26]\n";
+  }
+
+  static void emitInt8FragmentStore(llvm::raw_ostream &os, int source,
+                                    int rowGroup, int colGroup, int64_t base,
+                                    int64_t stride) {
+    os << "MOV R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MUL R26, R26, " << stride << "\n"
+       << "MOV R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "ADD R26, R26, R27\n"
+       << "MUL R26, R26, 4\n"
+       << "ADD R26, R26, " << base << "\n"
+       << "STG.I32 [R26], R" << source << "\n";
+  }
+
   static void emitLaneIndex(llvm::raw_ostream &os) {
     os << "IDIV R24, tid.x, 4\n"
        << "MUL R25, R24, 4\n"
@@ -2337,6 +2364,20 @@ struct MGpuToIsaPass
     if (m != 16 || k != 16 || kB != 16 || n != 16)
       return std::nullopt;
 
+    Type aElementType = aType.getElementType();
+    Type bElementType = bType.getElementType();
+    Type cElementType = cType.getElementType();
+    bool isF32 = aElementType.isF32() && bElementType.isF32() &&
+                 cElementType.isF32();
+    auto aIntType = dyn_cast<IntegerType>(aElementType);
+    auto bIntType = dyn_cast<IntegerType>(bElementType);
+    auto cIntType = dyn_cast<IntegerType>(cElementType);
+    bool isInt8 = aIntType && bIntType && cIntType &&
+                  aIntType.getWidth() == 8 && bIntType.getWidth() == 8 &&
+                  cIntType.getWidth() == 32;
+    if (!isF32 && !isInt8)
+      return std::nullopt;
+
     int64_t aBase = bufferMap.base(dstOp.getDpsInputs()[0]);
     int64_t bBase = bufferMap.base(dstOp.getDpsInputs()[1]);
     int64_t cBase = bufferMap.base(dstOp.getDpsInits()[0]);
@@ -2352,16 +2393,24 @@ struct MGpuToIsaPass
     for (int slot = 0; slot < 8; ++slot) {
       int rowGroup = slot / 4;
       int colGroup = slot % 4;
-      emitFragmentLoad(os, slot, rowGroup, colGroup, aBase, 16);
-      emitFragmentLoad(os, 8 + slot, rowGroup, colGroup, bBase, 16);
+      if (isInt8) {
+        emitInt8FragmentLoad(os, slot, rowGroup, colGroup, aBase, 16);
+        emitInt8FragmentLoad(os, 8 + slot, rowGroup, colGroup, bBase, 16);
+      } else {
+        emitFragmentLoad(os, slot, rowGroup, colGroup, aBase, 16);
+        emitFragmentLoad(os, 8 + slot, rowGroup, colGroup, bBase, 16);
+      }
     }
 
-    os << "MMA R16, R0, R8, R16\n";
+    os << (isInt8 ? "MMA.I8" : "MMA") << " R16, R0, R8, R16\n";
 
     for (int slot = 0; slot < 8; ++slot) {
       int rowGroup = slot / 4;
       int colGroup = slot % 4;
-      emitFragmentStore(os, 16 + slot, rowGroup, colGroup, cBase, 16);
+      if (isInt8)
+        emitInt8FragmentStore(os, 16 + slot, rowGroup, colGroup, cBase, 16);
+      else
+        emitFragmentStore(os, 16 + slot, rowGroup, colGroup, cBase, 16);
     }
     os << "EXIT\n";
     os.flush();
