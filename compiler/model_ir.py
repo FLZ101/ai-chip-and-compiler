@@ -75,6 +75,8 @@ class Op(str, Enum):
     MAX_POOL2D = "max_pool2d"
     AVG_POOL2D = "avg_pool2d"
     GLOBAL_AVG_POOL = "global_avg_pool"
+    EMBEDDING_GATHER = "embedding_gather"
+    ARGMAX = "argmax"
 
     # Normalization.
     BATCH_NORM = "batch_norm"
@@ -558,6 +560,23 @@ def infer_node_outputs(
             raise ModelIRError("global_avg_pool expects rank-4 NCHW input")
         n, c, _, _ = values[0].shape
         return one(values[0].dtype, (n, c, 1, 1))
+
+    if operation == Op.EMBEDDING_GATHER:
+        _require_arity(operation, values, 2, 2)
+        indices, weight = values
+        if weight.rank != 2:
+            raise ModelIRError("embedding_gather weight must be rank 2")
+        return one(weight.dtype, (*indices.shape, weight.shape[1]))
+
+    if operation == Op.ARGMAX:
+        _require_arity(operation, values, 1, 1)
+        input_value = values[0]
+        axis = int(attrs.get("axis", -1))
+        axis = axis + input_value.rank if axis < 0 else axis
+        if axis < 0 or axis >= input_value.rank:
+            raise ModelIRError("argmax axis out of range")
+        shape = input_value.shape[:axis] + input_value.shape[axis + 1 :]
+        return one(DType.I32, shape)
 
     if operation == Op.BATCH_NORM:
         _require_arity(operation, values, 5, 5)

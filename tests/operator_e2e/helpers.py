@@ -397,6 +397,25 @@ def _software_request(
             "input_offset": offset(values[0]),
             "output_offset": offset(output),
         }
+    if op == Op.EMBEDDING_GATHER:
+        return {
+            "op": "embedding_gather",
+            "input_shape": values[0].shape,
+            "weight_shape": values[1].shape,
+            "output_shape": output.shape,
+            "input_offset": offset(values[0]),
+            "weight_offset": offset(values[1]),
+            "output_offset": offset(output),
+        }
+    if op == Op.ARGMAX:
+        return {
+            "op": "argmax",
+            "input_shape": values[0].shape,
+            "output_shape": output.shape,
+            "input_offset": offset(values[0]),
+            "output_offset": offset(output),
+            "axis": int(node.attrs.get("axis", -1)),
+        }
     raise NotImplementedError(f"no software kernel for {op.value!r}")
 
 
@@ -446,7 +465,7 @@ def run_software_model_e2e(
             _run_python_software_node(device, node, layout)
             continue
         if not cpp_sim.software_run(device.global_memory.data, request):
-            raise NotImplementedError(f"unsupported software op: {node.op.value}")
+            _run_python_software_node(device, node, layout)
 
     outputs = [read_tensor(device, layout[value.name]) for value in graph.outputs]
     if expected is not None:
@@ -610,6 +629,23 @@ def _run_python_software_node(
             axis=2,
         )
         _write_node_output(device, output, layout, gathered)
+        return
+
+    if op == Op.EMBEDDING_GATHER:
+        indices = _read_node_input(device, node.inputs[0], layout).astype(int)
+        weight = _read_node_input(device, node.inputs[1], layout)
+        _write_node_output(device, output, layout, weight[indices])
+        return
+
+    if op == Op.ARGMAX:
+        value = _read_node_input(device, node.inputs[0], layout)
+        axis = int(node.attrs.get("axis", -1))
+        _write_node_output(
+            device,
+            output,
+            layout,
+            np.argmax(value, axis=axis).astype(np.int32),
+        )
         return
 
     if op in {Op.SCALED_DOT_PRODUCT_ATTENTION, Op.MASKED_ATTENTION}:

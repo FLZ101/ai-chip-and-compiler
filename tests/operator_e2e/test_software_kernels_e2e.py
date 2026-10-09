@@ -287,6 +287,36 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
         frontend.output(frontend.reshape(x, (1, 8)))
         self._assert_equivalent(frontend.build(), {"x": image}, image.reshape(1, 8))
 
+    def test_embedding_gather_software_reference(self):
+        indices = np.asarray([[0, 2], [1, 3]], dtype=np.int32)
+        weight = np.arange(20, dtype=np.float32).reshape(5, 4)
+        frontend = ManualFrontend("embedding_gather")
+        ids = frontend.add_input("indices", DType.I32, indices.shape)
+        w = frontend.add_input("weight", DType.F32, weight.shape)
+        frontend.output(frontend.embedding_gather(ids, w))
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 16, sm_count=4),
+            frontend.build(),
+            {"indices": indices, "weight": weight},
+            [weight[indices]],
+        )
+        np.testing.assert_array_equal(result.outputs[0], weight[indices])
+
+    def test_argmax_software_reference(self):
+        logits = np.asarray([[0.2, 1.3, 0.7], [2.1, 0.4, 0.9]], dtype=np.float32)
+        frontend = ManualFrontend("argmax")
+        x = frontend.add_input("x", DType.F32, logits.shape)
+        frontend.output(frontend.argmax(x, axis=-1))
+        result = run_software_model_e2e(
+            make_device(global_size=1 << 16, sm_count=4),
+            frontend.build(),
+            {"x": logits},
+            [np.argmax(logits, axis=-1).astype(np.int32)],
+        )
+        np.testing.assert_array_equal(
+            result.outputs[0], np.argmax(logits, axis=-1).astype(np.int32)
+        )
+
     def test_resize_software_matches_mgpu(self):
         image = np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)
         frontend = ManualFrontend("resize")

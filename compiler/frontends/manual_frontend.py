@@ -219,6 +219,24 @@ class ManualFrontend:
     def global_avg_pool(self, x: Value, *, name: str | None = None) -> Value:
         return self._emit(Op.GLOBAL_AVG_POOL, [x], name=name)
 
+    def embedding_gather(
+        self,
+        indices: Value,
+        weight: Value,
+        *,
+        name: str | None = None,
+    ) -> Value:
+        return self._emit(Op.EMBEDDING_GATHER, [indices, weight], name=name)
+
+    def argmax(
+        self,
+        x: Value,
+        *,
+        axis: int = -1,
+        name: str | None = None,
+    ) -> Value:
+        return self._emit(Op.ARGMAX, [x], {"axis": axis}, name=name)
+
     def batch_norm(
         self,
         x: Value,
