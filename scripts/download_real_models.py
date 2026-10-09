@@ -10,6 +10,7 @@ available for the importer and canonicalizer tests.
 from __future__ import annotations
 
 import argparse
+import os
 import urllib.request
 from pathlib import Path
 
@@ -19,6 +20,8 @@ GPT2_CONFIG_URL = "https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-conf
 GPT2_WEIGHTS_URL = (
     "https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-pytorch_model.bin"
 )
+
+PROJECT_CACHE = Path(__file__).resolve().parents[1] / ".cache"
 
 
 def main() -> int:
@@ -32,12 +35,15 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.model in {"resnet18", "all"}:
+        torch_home = PROJECT_CACHE / "torch"
+        torch_home.mkdir(parents=True, exist_ok=True)
+        os.environ["TORCH_HOME"] = str(torch_home)
         model = resnet18(weights=ResNet18_Weights.DEFAULT)
         print(
             f"downloaded {args.model} with {sum(p.numel() for p in model.parameters())} parameters"
         )
     if args.model in {"gpt2-small", "all"}:
-        target = Path(__file__).resolve().parents[1] / ".cache" / "gpt2-small"
+        target = PROJECT_CACHE / "gpt2-small"
         target.mkdir(parents=True, exist_ok=True)
         for url, name in (
             (GPT2_CONFIG_URL, "config.json"),

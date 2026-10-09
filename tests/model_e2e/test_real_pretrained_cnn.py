@@ -23,8 +23,17 @@ from compiler.mlir import (
     run_model_pipeline_with_memory_plan,
 )
 
-RESNET18_WEIGHTS = (
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_PROJECT_RESNET18_WEIGHTS = (
+    _PROJECT_ROOT / ".cache" / "torch" / "hub" / "checkpoints" / "resnet18-f37072fd.pth"
+)
+_HOME_RESNET18_WEIGHTS = (
     Path.home() / ".cache" / "torch" / "hub" / "checkpoints" / "resnet18-f37072fd.pth"
+)
+RESNET18_WEIGHTS = (
+    _PROJECT_RESNET18_WEIGHTS
+    if _PROJECT_RESNET18_WEIGHTS.exists()
+    else _HOME_RESNET18_WEIGHTS
 )
 
 
