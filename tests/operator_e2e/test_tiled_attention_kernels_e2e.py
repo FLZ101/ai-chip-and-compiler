@@ -10,16 +10,16 @@ from hw.isa import parse_asm
 from .helpers import allocate_global_buffers, read_tensor
 
 
-def _attention_mlir(seq: int, dim: int, scale: float) -> str:
-    """Build a single rank-4 attention function with fixed buffer ordering."""
+def _attention_mlir(batch: int, heads: int, seq: int, dim: int, scale: float) -> str:
+    """Build a rank-4 attention function with fixed buffer ordering."""
     return f"""module {{
   func.func @attention(
-      %q: memref<1x1x{seq}x{dim}xf32>, %k: memref<1x1x{seq}x{dim}xf32>,
-      %v: memref<1x1x{seq}x{dim}xf32>, %mask: memref<1x1x{seq}x{seq}xf32>,
-      %out: memref<1x1x{seq}x{dim}xf32>) {{
+      %q: memref<{batch}x{heads}x{seq}x{dim}xf32>, %k: memref<{batch}x{heads}x{seq}x{dim}xf32>,
+      %v: memref<{batch}x{heads}x{seq}x{dim}xf32>, %mask: memref<{batch}x{heads}x{seq}x{seq}xf32>,
+      %out: memref<{batch}x{heads}x{seq}x{dim}xf32>) {{
     %c1 = arith.constant 1 : index
     mgpu.launch blocks(%c1, %c1, %c1) threads(%c1, %c1, %c1) {{
-      mgpu.attention %q, %k, %v, %mask, %out {{scale = {scale} : f32, masked}} : memref<1x1x{seq}x{dim}xf32>, memref<1x1x{seq}x{dim}xf32>, memref<1x1x{seq}x{dim}xf32>, memref<1x1x{seq}x{seq}xf32>, memref<1x1x{seq}x{dim}xf32>
+      mgpu.attention %q, %k, %v, %mask, %out {{scale = {scale} : f32, masked}} : memref<{batch}x{heads}x{seq}x{dim}xf32>, memref<{batch}x{heads}x{seq}x{dim}xf32>, memref<{batch}x{heads}x{seq}x{dim}xf32>, memref<{batch}x{heads}x{seq}x{seq}xf32>, memref<{batch}x{heads}x{seq}x{dim}xf32>
       mgpu.return
     }}
     return
@@ -41,7 +41,7 @@ def _run_softmax_stage(q, k, v, mask):
     )
 
     result = run_mgpu_pipeline(
-        _attention_mlir(seq, dim, scale),
+        _attention_mlir(1, 1, seq, dim, scale),
         pipeline=("builtin.module(func.func(" "mgpu-to-isa{emit-attention-softmax}))"),
     )
     program = parse_asm(result.code)
@@ -63,12 +63,33 @@ def _run_full_attention(q, k, v, mask):
     )
 
     result = run_mgpu_pipeline(
-        _attention_mlir(seq, dim, scale),
+        _attention_mlir(1, 1, seq, dim, scale),
         pipeline=("builtin.module(func.func(" "mgpu-to-isa{emit-attention-tiled}))"),
     )
     program = parse_asm(result.code)
     python_launch(device, program, grid_dim=result.grid, block_dim=result.block)
     return read_tensor(device, layout["out"])
+
+
+def _run_mapped_full_attention(q, k, v, mask):
+    """Run the block-mapped full attention kernel and return its output."""
+    batch, heads, seq, dim = q.shape
+    scale = 1.0 / np.sqrt(dim)
+    out = np.zeros_like(q)
+
+    device = create_device(global_size=1 << 22, sm_count=4, shared_size=1 << 16)
+    layout = allocate_global_buffers(
+        device,
+        {"q": q, "k": k, "v": v, "mask": mask, "out": out},
+    )
+
+    result = run_mgpu_pipeline(
+        _attention_mlir(batch, heads, seq, dim, scale),
+        pipeline=("builtin.module(func.func(" "mgpu-to-isa{emit-attention-tiled}))"),
+    )
+    program = parse_asm(result.code)
+    python_launch(device, program, grid_dim=result.grid, block_dim=result.block)
+    return read_tensor(device, layout["out"]), result.grid
 
 
 def _read_softmax_weights(device, seq: int) -> np.ndarray:
@@ -156,6 +177,33 @@ class TestTiledAttentionKernels(unittest.TestCase):
 
     def test_full_attention_padded_head_dim(self):
         self._check_full_attention(seq=8, dim=20)
+
+    def _check_mapped_attention(self, batch: int, heads: int, seq: int, dim: int):
+        rng = np.random.default_rng(123)
+        q = rng.normal(size=(batch, heads, seq, dim)).astype(np.float32)
+        k = rng.normal(size=(batch, heads, seq, dim)).astype(np.float32)
+        v = rng.normal(size=(batch, heads, seq, dim)).astype(np.float32)
+        mask = np.tril(np.ones((seq, seq), dtype=np.float32)).reshape(1, 1, seq, seq)
+        mask = np.broadcast_to(mask, (batch, heads, seq, seq)).copy()
+        scale = 1.0 / np.sqrt(dim)
+
+        actual, grid = _run_mapped_full_attention(q, k, v, mask)
+        expected_blocks = batch * heads * ((seq + 15) // 16)
+        self.assertEqual(grid, (expected_blocks, 1, 1))
+
+        scores = np.matmul(q, np.swapaxes(k, -1, -2)) * scale
+        scores = np.where(mask == 0, -np.inf, scores)
+        shifted = scores - np.max(scores, axis=-1, keepdims=True)
+        exp = np.exp(shifted)
+        weights = exp / np.sum(exp, axis=-1, keepdims=True)
+        expected = np.matmul(weights, v)
+        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
+
+    def test_mapped_attention_multi_batch_head(self):
+        self._check_mapped_attention(batch=2, heads=3, seq=8, dim=16)
+
+    def test_mapped_attention_multi_query_tile(self):
+        self._check_mapped_attention(batch=1, heads=2, seq=20, dim=24)
 
 
 if __name__ == "__main__":
