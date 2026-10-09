@@ -513,6 +513,7 @@ class MLIRBuilder:
         output = node.outputs[0]
         padding = _pair(node.attrs.get("padding", 0), "padding")
         strides = _pair(node.attrs.get("strides", 1), "strides")
+        dilations = _pair(node.attrs.get("dilation", 1), "dilation")
         image_type = self._memref_type(image)
         weight_type = self._memref_type(weight)
         out_type = self._memref_type(output)
@@ -527,11 +528,13 @@ class MLIRBuilder:
         attr_text = "{hasBias}" if len(node.inputs) == 3 else "{}"
         pad_y, pad_x = padding
         stride_y, stride_x = strides
+        dil_y, dil_x = dilations
         return [
             f"{indent}mgpu.conv2d {self._value_names[image.name]}, "
             f"{self._value_names[weight.name]}, {bias_name}, {result_name} "
             f"padY = {pad_y}, padX = {pad_x}, strideY = {stride_y}, "
-            f"strideX = {stride_x} {attr_text} : {image_type}, {weight_type}, "
+            f"strideX = {stride_x}, dilY = {dil_y}, dilX = {dil_x} {attr_text} "
+            f": {image_type}, {weight_type}, "
             f"{bias_type}, {out_type}"
         ]
 

@@ -398,11 +398,14 @@ def MGPU_Conv2DOp : MGPU_Op<"conv2d", [MemoryEffects<[MemRead, MemWrite]>]> {
                        I64Attr:$padX,
                        I64Attr:$strideY,
                        I64Attr:$strideX,
+                       I64Attr:$dilY,
+                       I64Attr:$dilX,
                        UnitAttr:$hasBias);
   let results = (outs);
   let assemblyFormat = [{
     $image `,` $weight `,` $bias `,` $output
     `padY` `=` $padY `,` `padX` `=` $padX `,` `strideY` `=` $strideY `,` `strideX` `=` $strideX
+    `,` `dilY` `=` $dilY `,` `dilX` `=` $dilX
     attr-dict
     `:` type($image) `,` type($weight) `,` type($bias) `,` type($output)
   }];

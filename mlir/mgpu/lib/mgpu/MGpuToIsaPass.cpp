@@ -1466,6 +1466,12 @@ struct MGpuToIsaPass
     if (!inputType || !outputType || inputType.getRank() != 4 ||
         outputType.getRank() != 4)
       return std::nullopt;
+    if (dstOp.getDpsInputs().size() < 2)
+      return std::nullopt;
+    auto kernelType =
+        dyn_cast<MemRefType>(dstOp.getDpsInputs()[1].getType());
+    if (!kernelType || kernelType.getRank() != 2)
+      return std::nullopt;
 
     int64_t n = inputType.getShape()[0];
     int64_t c = inputType.getShape()[1];
@@ -1476,10 +1482,32 @@ struct MGpuToIsaPass
     if (n != 1)
       return std::nullopt;
 
-    int64_t kernelY = 2;
-    int64_t kernelX = 2;
-    int64_t strideY = 2;
-    int64_t strideX = 2;
+    int64_t kernelY = kernelType.getShape()[0];
+    int64_t kernelX = kernelType.getShape()[1];
+    int64_t strideY = 1;
+    int64_t strideX = 1;
+    int64_t dilY = 1;
+    int64_t dilX = 1;
+    if (auto strides =
+            op->getAttrOfType<DenseIntElementsAttr>("strides")) {
+      SmallVector<int64_t, 2> values;
+      for (int64_t value : strides.getValues<int64_t>())
+        values.push_back(value);
+      if (values.size() == 2) {
+        strideY = values[0];
+        strideX = values[1];
+      }
+    }
+    if (auto dilations =
+            op->getAttrOfType<DenseIntElementsAttr>("dilations")) {
+      SmallVector<int64_t, 2> values;
+      for (int64_t value : dilations.getValues<int64_t>())
+        values.push_back(value);
+      if (values.size() == 2) {
+        dilY = values[0];
+        dilX = values[1];
+      }
+    }
     int64_t total = c * oh * ow;
     int64_t inputBase = bufferMap.base(dstOp.getDpsInputs()[0]);
     int64_t outputBase = bufferMap.base(dstOp.getDpsInits()[0]);
@@ -1495,27 +1523,39 @@ struct MGpuToIsaPass
        << "IDIV R2, R5, " << ow << "\n"
        << "MUL R6, R2, " << ow << "\n"
        << "SUB R3, R5, R6\n"
-       << "MOV R20, " << identity << "\n";
-
-    for (int64_t ky = 0; ky < kernelY; ++ky) {
-      for (int64_t kx = 0; kx < kernelX; ++kx) {
-        os << "MOV R4, " << strideY << "\n"
-           << "MUL R4, R2, R4\n"
-           << "ADD R4, R4, " << ky << "\n"
-           << "MOV R5, " << strideX << "\n"
-           << "MUL R5, R3, R5\n"
-           << "ADD R5, R5, " << kx << "\n"
-           << "MOV R6, " << h << "\n"
-           << "MUL R6, R1, R6\n"
-           << "ADD R6, R6, R4\n"
-           << "MUL R6, R6, " << w << "\n"
-           << "ADD R6, R6, R5\n"
-           << "MUL R6, R6, 4\n"
-           << "ADD R6, R6, " << inputBase << "\n"
-           << "LDG R8, [R6]\n"
-           << arith << " R20, R20, R8\n";
-      }
-    }
+       << "MOV R20, " << identity << "\n"
+       << "MOV R21, 0\n"
+       << "MOV R22, " << (kernelY * kernelX) << "\n"
+       << "pool_loop:\n"
+       << "CMP.LT R23, R21, R22\n"
+       << "BRA pool_body, R23, pool_end\n"
+       << "BRA pool_end\n"
+       << "pool_body:\n"
+       << "IDIV R24, R21, " << kernelX << "\n"
+       << "MUL R25, R24, " << kernelX << "\n"
+       << "SUB R26, R21, R25\n"
+       << "MOV R30, " << strideY << "\n"
+       << "MUL R30, R2, R30\n"
+       << "MOV R31, " << dilY << "\n"
+       << "MUL R31, R24, R31\n"
+       << "ADD R30, R30, R31\n"
+       << "MOV R31, " << strideX << "\n"
+       << "MUL R31, R3, R31\n"
+       << "MOV R32, " << dilX << "\n"
+       << "MUL R32, R26, R32\n"
+       << "ADD R31, R31, R32\n"
+       << "MOV R6, " << h << "\n"
+       << "MUL R6, R1, R6\n"
+       << "ADD R6, R6, R30\n"
+       << "MUL R6, R6, " << w << "\n"
+       << "ADD R6, R6, R31\n"
+       << "MUL R6, R6, 4\n"
+       << "ADD R6, R6, " << inputBase << "\n"
+       << "LDG R8, [R6]\n"
+       << arith << " R20, R20, R8\n"
+       << "ADD R21, R21, 1\n"
+       << "BRA pool_loop\n"
+       << "pool_end:\n";
 
     if (!maxPool)
       os << "DIV R20, R20, " << (kernelY * kernelX) << "\n";
@@ -1577,20 +1617,29 @@ struct MGpuToIsaPass
       llvm::raw_string_ostream os(code);
       emitCnnPrologue(os, total);
       os << "MOV R1, R0\n"
-         << "MOV R20, 0\n";
-      for (int64_t ih = 0; ih < h; ++ih) {
-        for (int64_t iw = 0; iw < w; ++iw) {
-          os << "MOV R4, " << h << "\n"
-             << "MUL R4, R1, R4\n"
-             << "ADD R4, R4, " << ih << "\n"
-             << "MUL R4, R4, " << w << "\n"
-             << "ADD R4, R4, " << iw << "\n"
-             << "MUL R4, R4, 4\n"
-             << "ADD R4, R4, " << inputBase << "\n"
-             << "LDG R6, [R4]\n"
-             << "ADD R20, R20, R6\n";
-        }
-      }
+         << "MOV R20, 0\n"
+         << "MOV R21, 0\n"
+         << "MOV R22, " << (h * w) << "\n"
+         << "gap_loop:\n"
+         << "CMP.LT R23, R21, R22\n"
+         << "BRA gap_body, R23, gap_end\n"
+         << "BRA gap_end\n"
+         << "gap_body:\n"
+         << "IDIV R24, R21, " << w << "\n"
+         << "MUL R25, R24, " << w << "\n"
+         << "SUB R26, R21, R25\n"
+         << "MOV R4, " << h << "\n"
+         << "MUL R4, R1, R4\n"
+         << "ADD R4, R4, R24\n"
+         << "MUL R4, R4, " << w << "\n"
+         << "ADD R4, R4, R26\n"
+         << "MUL R4, R4, 4\n"
+         << "ADD R4, R4, " << inputBase << "\n"
+         << "LDG R6, [R4]\n"
+         << "ADD R20, R20, R6\n"
+         << "ADD R21, R21, 1\n"
+         << "BRA gap_loop\n"
+         << "gap_end:\n";
       os << "DIV R20, R20, " << (h * w) << "\n"
          << "MUL R4, R1, 4\n"
          << "ADD R4, R4, " << outputBase << "\n"
@@ -3253,6 +3302,8 @@ struct MGpuToIsaPass
     int64_t padX = 0;
     int64_t strideY = 1;
     int64_t strideX = 1;
+    int64_t dilY = 1;
+    int64_t dilX = 1;
 
     SmallVector<mgpu::Conv2DOp> customConvs;
     launch.getBody().front().walk(
@@ -3268,6 +3319,8 @@ struct MGpuToIsaPass
       padX = conv.getPadX();
       strideY = conv.getStrideY();
       strideX = conv.getStrideX();
+      dilY = conv.getDilY();
+      dilX = conv.getDilX();
     } else {
       SmallVector<linalg::Conv2DNchwFchwOp> convs;
       launch.getBody().front().walk(
@@ -3281,6 +3334,24 @@ struct MGpuToIsaPass
       imageValue = dstOp.getDpsInputs()[0];
       weightValue = dstOp.getDpsInputs()[1];
       outputValue = dstOp.getDpsInits()[0];
+      if (auto strides = conv.getStrides()) {
+        SmallVector<int64_t, 2> values;
+        for (int64_t value : strides.getValues<int64_t>())
+          values.push_back(value);
+        if (values.size() == 2) {
+          strideY = values[0];
+          strideX = values[1];
+        }
+      }
+      if (auto dilations = conv.getDilations()) {
+        SmallVector<int64_t, 2> values;
+        for (int64_t value : dilations.getValues<int64_t>())
+          values.push_back(value);
+        if (values.size() == 2) {
+          dilY = values[0];
+          dilX = values[1];
+        }
+      }
     }
 
     auto imageType = dyn_cast<MemRefType>(imageValue.getType());
@@ -3319,10 +3390,11 @@ struct MGpuToIsaPass
                      !weightType.getElementType().isF32() ||
                      !outputType.getElementType().isF32();
     if (typedConv || padY != 0 || padX != 0 || strideY != 1 || strideX != 1 ||
-        spatialSize > 16 || reductionSize > 16 || f > 16)
+        dilY != 1 || dilX != 1 || spatialSize > 16 || reductionSize > 16 ||
+        f > 16)
       return emitScalarConvIsa(imageValue, weightValue, outputValue, biasValue,
                                biasType, hasBias, c, h, w, f, kh, kw, oh, ow,
-                               padY, padX, strideY, strideX);
+                               padY, padX, strideY, strideX, dilY, dilX);
 
     int64_t imageBase = bufferMap.base(imageValue);
     int64_t weightBase = bufferMap.base(weightValue);
@@ -3392,7 +3464,8 @@ struct MGpuToIsaPass
       Value imageValue, Value weightValue, Value outputValue, Value biasValue,
       MemRefType biasType, bool hasBias, int64_t c, int64_t h, int64_t w,
       int64_t f, int64_t kh, int64_t kw, int64_t oh, int64_t ow, int64_t padY,
-      int64_t padX, int64_t strideY, int64_t strideX) {
+      int64_t padX, int64_t strideY, int64_t strideX, int64_t dilY,
+      int64_t dilX) {
     auto imageType = dyn_cast<MemRefType>(imageValue.getType());
     auto weightType = dyn_cast<MemRefType>(weightValue.getType());
     auto outputType = dyn_cast<MemRefType>(outputValue.getType());
@@ -3435,7 +3508,9 @@ struct MGpuToIsaPass
        << "SUB R29, R26, R28\n"
        << "MOV R30, " << strideY << "\n"
        << "MUL R30, R2, R30\n"
-       << "ADD R30, R30, R27\n"
+       << "MOV R32, " << dilY << "\n"
+       << "MUL R32, R27, R32\n"
+       << "ADD R30, R30, R32\n"
        << "SUB R30, R30, " << padY << "\n"
        << "CMP.GE R4, R30, 0\n"
        << "MOV R5, " << h << "\n"
@@ -3447,7 +3522,9 @@ struct MGpuToIsaPass
        << "MIN R10, R9, R8\n"
        << "MOV R31, " << strideX << "\n"
        << "MUL R31, R3, R31\n"
-       << "ADD R31, R31, R29\n"
+       << "MOV R33, " << dilX << "\n"
+       << "MUL R33, R29, R33\n"
+       << "ADD R31, R31, R33\n"
        << "SUB R31, R31, " << padX << "\n"
        << "CMP.GE R11, R31, 0\n"
        << "MOV R12, " << w << "\n"
