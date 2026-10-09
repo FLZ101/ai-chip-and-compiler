@@ -113,22 +113,24 @@ double special_register_value(Device &device, SM &sm, WarpState &warp,
 double read_operand(Device &device, SM &sm, WarpState &warp, LaneState &lane,
                     const Operand &operand) {
   if (operand.kind == OperandKind::Reg) {
-    if (is_special_register(operand.text))
+    if (operand.special)
       return special_register_value(device, sm, warp, lane, operand.text);
-    int index = std::stoi(operand.text.substr(1));
-    if (index < 0 || index >= static_cast<int>(lane.regs.size()))
+    if (operand.reg_index < 0 ||
+        operand.reg_index >= static_cast<int>(lane.regs.size()))
       throw std::runtime_error("unknown register: " + operand.text);
-    return lane.regs[index];
+    return lane.regs[operand.reg_index];
   }
   if (operand.kind == OperandKind::Imm)
     return operand.imm;
   if (operand.kind == OperandKind::Mem) {
     double base = 0;
-    if (is_special_register(operand.base))
+    if (operand.base_special)
       base = special_register_value(device, sm, warp, lane, operand.base);
     else {
-      int index = std::stoi(operand.base.substr(1));
-      base = lane.regs.at(index);
+      if (operand.base_reg_index < 0 ||
+          operand.base_reg_index >= static_cast<int>(lane.regs.size()))
+        throw std::runtime_error("unknown memory base: " + operand.base);
+      base = lane.regs[operand.base_reg_index];
     }
     return base + operand.offset;
   }
@@ -138,8 +140,9 @@ double read_operand(Device &device, SM &sm, WarpState &warp, LaneState &lane,
 void write_register(LaneState &lane, const Operand &dst, double value) {
   if (dst.kind != OperandKind::Reg)
     throw std::runtime_error("destination is not a register");
-  int index = std::stoi(dst.text.substr(1));
-  lane.regs.at(index) = value;
+  if (dst.reg_index < 0 || dst.reg_index >= static_cast<int>(lane.regs.size()))
+    throw std::runtime_error("unknown destination register");
+  lane.regs[dst.reg_index] = value;
 }
 
 double alu(const std::string &op, double a, double b, double c) {

@@ -96,6 +96,9 @@ Operand parse_operand(std::string token) {
         std::remove_if(operand.base.begin(), operand.base.end(),
                        [](unsigned char c) { return std::isspace(c); }),
         operand.base.end());
+    operand.base_special = is_special_register(operand.base);
+    if (!operand.base_special && !operand.base.empty() && operand.base[0] == 'R')
+      operand.base_reg_index = std::stoi(operand.base.substr(1));
     return operand;
   }
 
@@ -103,6 +106,9 @@ Operand parse_operand(std::string token) {
     Operand operand;
     operand.kind = OperandKind::Reg;
     operand.text = token;
+    operand.special = is_special_register(token);
+    if (!operand.special)
+      operand.reg_index = std::stoi(token.substr(1));
     return operand;
   }
 

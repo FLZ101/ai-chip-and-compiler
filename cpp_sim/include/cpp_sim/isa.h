@@ -13,6 +13,10 @@ struct Operand {
   OperandKind kind = OperandKind::Imm;
   std::string text;
   std::string base;
+  bool special = false;
+  bool base_special = false;
+  int reg_index = -1;
+  int base_reg_index = -1;
   int64_t offset = 0;
   double imm = 0.0;
 };
