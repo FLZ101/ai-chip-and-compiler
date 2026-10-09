@@ -428,6 +428,7 @@ def run_software_model_e2e(
     progress: bool = False,
     rtol: float = 1e-5,
     atol: float = 1e-6,
+    use_native: bool = True,
 ) -> OperatorE2EResult:
     cpp_sim_dir = Path(__file__).resolve().parents[2] / ".deps" / "cpp-sim-build"
     if str(cpp_sim_dir) not in sys.path:
@@ -459,6 +460,9 @@ def run_software_model_e2e(
                 file=sys.stderr,
                 flush=True,
             )
+        if not use_native:
+            _run_python_software_node(device, node, layout)
+            continue
         if node.op == Op.ADD and node.inputs[0].shape != node.inputs[1].shape:
             _run_python_software_node(device, node, layout)
             continue
@@ -550,6 +554,11 @@ def _run_python_software_node(
         _write_node_output(device, output, layout, np.matmul(left, right))
         return
 
+    if op == Op.RESHAPE:
+        value = _read_node_input(device, node.inputs[0], layout)
+        _write_node_output(device, output, layout, value.reshape(output.shape))
+        return
+
     if op == Op.CONCAT:
         values = [_read_node_input(device, value, layout) for value in node.inputs]
         axis = int(node.attrs.get("axis", 0))
@@ -625,8 +634,12 @@ def _run_python_software_node(
 
     if op == Op.GELU:
         value = _read_node_input(device, node.inputs[0], layout)
-        cdf = np.vectorize(math.erf)(value / math.sqrt(2.0))
-        _write_node_output(device, output, layout, 0.5 * value * (1.0 + cdf))
+        gelu = (
+            0.5
+            * value
+            * (1.0 + np.tanh(math.sqrt(2.0 / math.pi) * (value + 0.044715 * value**3)))
+        )
+        _write_node_output(device, output, layout, gelu)
         return
 
     if op == Op.RMS_NORM:

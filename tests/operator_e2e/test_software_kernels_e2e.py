@@ -496,7 +496,9 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
         frontend = ManualFrontend("gelu")
         value = frontend.add_input("x", DType.F32, x.shape)
         frontend.output(frontend.gelu(value))
-        expected = 0.5 * x * (1.0 + np.vectorize(math.erf)(x / math.sqrt(2.0)))
+        expected = (
+            0.5 * x * (1.0 + np.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * x**3)))
+        )
         result = run_software_model_e2e(
             make_device(global_size=1 << 20, sm_count=4),
             frontend.build(),
@@ -512,7 +514,9 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
         frontend = ManualFrontend("gelu_differential")
         value = frontend.add_input("x", DType.F32, x.shape)
         frontend.output(frontend.gelu(value))
-        expected = 0.5 * x * (1.0 + np.vectorize(math.erf)(x / math.sqrt(2.0)))
+        expected = (
+            0.5 * x * (1.0 + np.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * x**3)))
+        )
         self._assert_equivalent(
             frontend.build(),
             {"x": x},
