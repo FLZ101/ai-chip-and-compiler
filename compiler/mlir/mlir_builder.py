@@ -1039,17 +1039,9 @@ class MLIRBuilder:
     def _emit_attention(self, node: Node, result_name: str, indent: str) -> list[str]:
         q, k, v = node.inputs[:3]
         output = node.outputs[0]
-        if (
-            q.rank != 4
-            or k.rank != 4
-            or v.rank != 4
-            or q.shape[:2] != (1, 1)
-            or k.shape[:2] != (1, 1)
-            or v.shape[:2] != (1, 1)
-        ):
+        if q.rank != 4 or k.rank != 4 or v.rank != 4:
             raise MLIRBuilderError(
-                "linalg attention lowering currently supports rank-4 Q/K/V "
-                "with batch=1 and heads=1"
+                "attention lowering currently supports rank-4 Q/K/V tensors"
             )
         mask_value = node.inputs[3] if node.op == Op.MASKED_ATTENTION else q
         scale = float(node.attrs.get("scale", 1.0 / math.sqrt(q.shape[3])))

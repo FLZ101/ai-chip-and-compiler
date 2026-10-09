@@ -4793,8 +4793,24 @@ struct MGpuToIsaPass
     shape.maskBase = bufferMap.base(attention.getMask());
     shape.qBatchStride = heads * seq * dim * 4;
     shape.qHeadStride = seq * dim * 4;
-    shape.maskBatchStride = heads * seq * seq * 4;
-    shape.maskHeadStride = seq * seq * 4;
+    shape.maskBatchStride = 0;
+    shape.maskHeadStride = 0;
+    if (attention.getMasked()) {
+      auto maskType = dyn_cast<MemRefType>(attention.getMask().getType());
+      if (!maskType || maskType.getRank() != 4 ||
+          maskType.getShape()[2] != seq || maskType.getShape()[3] != seq)
+        return std::nullopt;
+      int64_t maskBatch = maskType.getShape()[0];
+      int64_t maskHeads = maskType.getShape()[1];
+      if ((maskBatch != 1 && maskBatch != batch) ||
+          (maskHeads != 1 && maskHeads != heads))
+        return std::nullopt;
+      shape.maskBatchStride =
+          maskBatch == 1 ? 0
+                         : (maskHeads > 1 ? maskHeads * seq * seq
+                                          : seq * seq) * 4;
+      shape.maskHeadStride = maskHeads == 1 ? 0 : seq * seq * 4;
+    }
     return shape;
   }
 
