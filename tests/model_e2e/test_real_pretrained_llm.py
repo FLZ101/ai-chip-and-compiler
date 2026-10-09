@@ -80,6 +80,7 @@ class TestPretrainedLLMImport(unittest.TestCase):
         self.assertEqual(canonicalized.source, "fx")
         self.assertEqual(canonicalized.target, "linalg-on-tensors")
         self.assertNotIn("torch.aten", canonicalized.text)
+        self.assertNotIn("tm_tensor.scan", canonicalized.text)
         self.assertTrue(canonicalized.mlir_module.operation.verify())
 
 

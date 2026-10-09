@@ -7,6 +7,7 @@ import torch.nn as nn
 from onnx import TensorProto, helper
 
 from compiler.mlir import MLIRCanonicalizer, ONNXImporter, TorchMLIRImporter
+from compiler.mlir.canonicalizer import _lower_tm_tensor_scan_text
 
 
 class TinyLinearBlock(nn.Module):
@@ -87,6 +88,27 @@ def _build_qdq_onnx() -> onnx.ModelProto:
 
 
 class TestMLIRCanonicalizer(unittest.TestCase):
+    def test_tm_tensor_scan_lowers_to_linalg_matmul(self):
+        mlir_text = """module {
+  func.func @scan(%arg0: tensor<1x4xi64>) -> tensor<1x4xi64> {
+    %c0 = arith.constant 0 : i64
+    %out = linalg.fill ins(%c0 : i64) outs(%arg0 : tensor<1x4xi64>) -> tensor<1x4xi64>
+    %acc = tensor.empty() : tensor<1xi64>
+    %acc0 = linalg.fill ins(%c0 : i64) outs(%acc : tensor<1xi64>) -> tensor<1xi64>
+    %res:2 = tm_tensor.scan dimension(1) inclusive(true) ins(%arg0 : tensor<1x4xi64>) outs(%out, %acc0 : tensor<1x4xi64>, tensor<1xi64>) {
+    ^bb0(%a: i64, %b: i64):
+      %s = arith.addi %a, %b : i64
+      tm_tensor.yield %s : i64
+    } -> tensor<1x4xi64>, tensor<1xi64>
+    return %res#0 : tensor<1x4xi64>
+  }
+}"""
+        lowered = _lower_tm_tensor_scan_text(mlir_text)
+        self.assertNotIn("tm_tensor.scan", lowered)
+        self.assertNotIn("%res#0", lowered)
+        self.assertIn("linalg.matmul", lowered)
+        self.assertIn("dense<[[1, 0, 0, 0]", lowered)
+
     def test_fx_import_canonicalizes_to_linalg(self):
         model = TinyLinearBlock()
         imported = TorchMLIRImporter().import_module(
