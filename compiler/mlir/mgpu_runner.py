@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-
-from torch_mlir import ir
 
 from .pipeline import mgpu_opt_pipeline_text
 
@@ -67,17 +66,16 @@ def run_mgpu_pipeline(
             f"{completed.stderr}"
         )
 
-    module = _parse_module(completed.stdout)
-    isa_ops = [op for op in _walk_module_operations(module) if op.name == "mgpu.isa"]
-    if len(isa_ops) != 1:
+    isa_attrs = _extract_isa_attrs(completed.stdout)
+    if len(isa_attrs) != 1:
         raise MGpuOptError(
-            f"expected exactly one mgpu.isa operation, found {len(isa_ops)}"
+            f"expected exactly one mgpu.isa operation, found {len(isa_attrs)}"
         )
 
-    op = isa_ops[0]
-    code = _string_attr(op, "code")
-    grid = _dim_tuple_attr(op, "grid")
-    block = _dim_tuple_attr(op, "block")
+    attrs = isa_attrs[0]
+    code = _unescape_mlir_string(attrs["code"])
+    grid = _parse_dim_string(_unescape_mlir_string(attrs["grid"]))
+    block = _parse_dim_string(_unescape_mlir_string(attrs["block"]))
     return MGpuIsaResult(code=code, grid=grid, block=block)
 
 
@@ -87,43 +85,59 @@ def lower_with_mgpu_opt(
     layout: dict[str, object],
 ) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]]]:
     """Adapter matching the E2E ``LoweringFn`` contract."""
-    del graph, layout  # Phase 0 does not yet need them; later phases will.
-    result = run_mgpu_pipeline(mlir_text)
+    from .mlir_builder import MLIRBuilder
+
+    builder = MLIRBuilder()
+    input_names = [value.name for value in graph.inputs]
+    output_names = [value.name for value in graph.outputs]
+    buffers = [f"%arg{index}" for index in range(len(input_names))]
+    buffers.extend(f"%v{index}" for index in range(len(output_names)))
+    types = [
+        builder._memref_type_for(value.shape, value.dtype) for value in graph.inputs
+    ]
+    types.extend(
+        builder._memref_type_for(value.shape, value.dtype) for value in graph.outputs
+    )
+    offsets = [layout[name].base_addr for name in input_names + output_names]
+
+    layout_line = (
+        "    mgpu.memory_layout "
+        + ", ".join(buffers)
+        + " offsets = ["
+        + ", ".join(str(offset) for offset in offsets)
+        + "] : "
+        + ", ".join(types)
+    )
+    injected = mlir_text.replace(
+        "    mgpu.launch",
+        layout_line + "\n    mgpu.launch",
+        1,
+    )
+
+    result = run_mgpu_pipeline(injected)
     return result.code, (result.grid, result.block)
 
 
-def _parse_module(mlir_text: str):
-    with ir.Context() as context:
-        context.allow_unregistered_dialects = True
-        return ir.Module.parse(mlir_text)
+def _extract_isa_attrs(mlir_text: str) -> list[dict[str, str]]:
+    operations = re.findall(r'"mgpu\.isa"\(\)\s*<\{([^}]*)\}>', mlir_text)
+    results: list[dict[str, str]] = []
+    for body in operations:
+        attrs: dict[str, str] = {}
+        for name, value in re.findall(
+            r'\b(code|grid|block)\s*=\s*"((?:\\.|[^"])*)"', body
+        ):
+            attrs[name] = value
+        if set(attrs) == {"code", "grid", "block"}:
+            results.append(attrs)
+    return results
 
 
-def _walk_operations(op):
-    for region in op.regions:
-        for block in region.blocks:
-            for child in block.operations:
-                yield child
-                yield from _walk_operations(child)
+def _unescape_mlir_string(value: str) -> str:
+    return value.replace("\\0A", "\n").replace("\\22", '"').replace("\\5C", "\\")
 
 
-def _walk_module_operations(module):
-    for child in module.body.operations:
-        yield child
-        yield from _walk_operations(child)
-
-
-def _string_attr(op, name: str) -> str:
-    value = op.attributes[name].value
-    if not isinstance(value, str):
-        raise MGpuOptError(f"attribute {name!r} on {op.name} is not a string")
-    return value
-
-
-def _dim_tuple_attr(op, name: str) -> tuple[int, ...]:
-    value = _string_attr(op, name)
+def _parse_dim_string(value: str) -> tuple[int, ...]:
     try:
         return tuple(int(part) for part in value.split("x"))
     except ValueError as exc:
-        raise MGpuOptError(
-            f"attribute {name!r} on {op.name} is not an x-separated tuple: {value!r}"
-        ) from exc
+        raise MGpuOptError(f"invalid launch dimension string: {value!r}") from exc

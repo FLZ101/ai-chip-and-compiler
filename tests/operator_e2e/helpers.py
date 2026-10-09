@@ -19,8 +19,8 @@ from typing import Callable
 
 import numpy as np
 
-from compiler.codegen.dispatcher import lower_kernel_python
 from compiler.mlir import MLIRBuilder
+from compiler.codegen.dispatcher import lower_kernel_python
 from compiler.model_ir import Graph, Op
 from hw.device import Device, create_device, launch
 from hw.isa import parse_asm
