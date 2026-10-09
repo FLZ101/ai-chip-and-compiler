@@ -10,6 +10,8 @@
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 
 #include <vector>
 
@@ -20,6 +22,37 @@
 using namespace mlir;
 
 namespace {
+
+class BufferMap {
+public:
+  static BufferMap build(func::FuncOp func) {
+    BufferMap map;
+    func.walk([&](mgpu::MemoryLayoutOp layout) {
+      for (auto [value, offset] :
+           llvm::zip(layout.getBuffers(), layout.getOffsets())) {
+        map.offsets[value] = offset;
+      }
+    });
+    return map;
+  }
+
+  std::optional<int64_t> lookup(Value value) const {
+    auto it = offsets.find(value);
+    if (it == offsets.end())
+      return std::nullopt;
+    return it->second;
+  }
+
+  int64_t base(Value value) const {
+    if (auto offset = lookup(value))
+      return *offset;
+    llvm::report_fatal_error(
+        "mgpu-to-isa: missing buffer offset in mgpu.memory_layout");
+  }
+
+private:
+  DenseMap<Value, int64_t> offsets;
+};
 
 class VirtualRegisterAllocator {
 public:
@@ -99,6 +132,7 @@ struct MGpuToIsaPass
   }
 
   void runOnOperation() override {
+    bufferMap = BufferMap::build(getOperation());
     SmallVector<mgpu::LaunchOp> launches;
     getOperation().walk(
         [&](mgpu::LaunchOp launch) { launches.push_back(launch); });
@@ -338,6 +372,8 @@ struct MGpuToIsaPass
     std::string grid;
     std::string block;
   };
+
+  BufferMap bufferMap;
 
   std::optional<IsaText> emitVectorAddIsa(mgpu::LaunchOp launch) {
     SmallVector<linalg::GenericOp> generics;
