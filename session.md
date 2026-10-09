@@ -62,7 +62,9 @@ this blocker; see `docs/cpp-simulator-plan.md`.
 - Phase 4: pybind11 backend and `MGPU_CPP_SIM=1` wrapper are implemented.
 - Phase 5: benchmark harness and Makefile targets are implemented.
 - Phase 6: full ResNet18 224x224 validation is still too slow with the current
-  instruction interpreter and is not yet passing.
+  instruction interpreter. A native software-kernel full-model runner has been
+  added and the opt-in full ResNet18 software forward now passes in about 44
+  seconds.
 
 Build native simulator:
 
@@ -70,6 +72,7 @@ Build native simulator:
 make cpp-sim
 make cpp-sim-test
 make benchmark-cpp-sim
+make full-resnet18
 ```
 
 ## Verification commands
