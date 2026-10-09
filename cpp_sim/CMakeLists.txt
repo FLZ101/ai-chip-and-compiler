@@ -3,6 +3,15 @@ project(cpp_sim LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+execute_process(
+  COMMAND "${Python3_EXECUTABLE}" -m pybind11 --cmakedir
+  OUTPUT_VARIABLE PYBIND11_CMAKE_DIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE)
+list(APPEND CMAKE_PREFIX_PATH "${PYBIND11_CMAKE_DIR}")
+find_package(pybind11 CONFIG REQUIRED)
 
 add_library(cpp_sim_parser STATIC
   src/isa.cpp
@@ -28,6 +37,9 @@ target_link_libraries(cpp_sim_memory_test PRIVATE cpp_sim_memory)
 
 add_executable(cpp_sim_core_test tests/test_core.cpp)
 target_link_libraries(cpp_sim_core_test PRIVATE cpp_sim_core)
+
+pybind11_add_module(cpp_sim MODULE src/python_bindings.cpp)
+target_link_libraries(cpp_sim PRIVATE cpp_sim_core)
 
 enable_testing()
 add_test(NAME cpp_sim_parser_test COMMAND cpp_sim_parser_test)

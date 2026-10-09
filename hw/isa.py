@@ -201,6 +201,7 @@ class Instruction:
 class Program:
     instructions: list[Instruction]
     labels: dict[str, int]
+    source: str = ""
 
     def __len__(self) -> int:
         return len(self.instructions)
@@ -284,6 +285,7 @@ def parse_asm(text: str) -> Program:
     """
     instructions: list[Instruction] = []
     labels: dict[str, int] = {}
+    source = text
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -356,7 +358,7 @@ def parse_asm(text: str) -> Program:
                 if isinstance(operand, Label) and operand.name not in labels:
                     raise ValueError(f"undefined branch label: {operand.name}")
 
-    return Program(instructions, labels)
+    return Program(instructions, labels, source=source)
 
 
 def _format_operand(operand: Operand) -> str:
