@@ -507,6 +507,65 @@ class TestSoftwareKernelsEndToEnd(unittest.TestCase):
         )
         np.testing.assert_allclose(result.outputs[0], expected, rtol=1e-5, atol=1e-5)
 
+    def test_gelu_software_matches_mgpu_and_reference(self):
+        x = np.linspace(-4.0, 4.0, 64, dtype=np.float32)
+        frontend = ManualFrontend("gelu_differential")
+        value = frontend.add_input("x", DType.F32, x.shape)
+        frontend.output(frontend.gelu(value))
+        expected = 0.5 * x * (1.0 + np.vectorize(math.erf)(x / math.sqrt(2.0)))
+        self._assert_equivalent(
+            frontend.build(),
+            {"x": x},
+            expected.astype(np.float32),
+            rtol=1e-3,
+            atol=1e-3,
+        )
+
+    def test_batched_linear_software_matches_mgpu_rank2_reference(self):
+        rng = np.random.default_rng(27)
+        x3 = rng.normal(size=(1, 3, 4)).astype(np.float32)
+        x2 = x3.reshape(3, 4)
+        w = rng.normal(size=(5, 4)).astype(np.float32)
+        b = rng.normal(size=(5,)).astype(np.float32)
+        expected3 = x3 @ w.T + b
+        expected2 = x2 @ w.T + b
+
+        software_frontend = ManualFrontend("batched_linear_differential")
+        sv = software_frontend.add_input("x", DType.F32, x3.shape)
+        sw = software_frontend.add_input("w", DType.F32, w.shape)
+        sb = software_frontend.add_input("b", DType.F32, b.shape)
+        software_frontend.output(software_frontend.linear(sv, sw, sb))
+
+        mgpu_frontend = ManualFrontend("rank2_linear_differential")
+        mv = mgpu_frontend.add_input("x", DType.F32, x2.shape)
+        mw = mgpu_frontend.add_input("w", DType.F32, w.shape)
+        mb = mgpu_frontend.add_input("b", DType.F32, b.shape)
+        mgpu_frontend.output(mgpu_frontend.linear(mv, mw, mb))
+
+        software = run_software_model_e2e(
+            make_device(global_size=1 << 24, sm_count=4),
+            software_frontend.build(),
+            {"x": x3, "w": w, "b": b},
+            [expected3],
+            rtol=1e-4,
+            atol=1e-4,
+        )
+        mgpu = run_operator_e2e(
+            make_device(global_size=1 << 24, sm_count=4),
+            mgpu_frontend.build(),
+            {"x": x2, "w": w, "b": b},
+            [expected2],
+            lowering=lower_kernel,
+            rtol=1e-4,
+            atol=1e-4,
+        )
+        np.testing.assert_allclose(
+            software.outputs[0].reshape(expected2.shape),
+            mgpu.outputs[0],
+            rtol=1e-4,
+            atol=1e-4,
+        )
+
     @unittest.skipUnless(
         os.environ.get("MGPU_RUN_LARGE_LINEAR") == "1",
         "set MGPU_RUN_LARGE_LINEAR=1 to run the full vocab linear gate",
