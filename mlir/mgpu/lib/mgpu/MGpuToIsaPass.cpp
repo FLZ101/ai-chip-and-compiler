@@ -3926,12 +3926,70 @@ struct MGpuToIsaPass
        << "SEL R" << dest << ", R28, R42, R39\n";
   }
 
+  static void emitAttentionQFragmentTiled(
+      llvm::raw_ostream &os, int dest, int rowGroup, int colGroup,
+      int64_t qBase, int64_t seq, int64_t dim, int64_t rowOffset,
+      int64_t colOffset) {
+    os << "MOV R26, " << rowOffset << "\n"
+       << "ADD R26, R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MOV R27, " << colOffset << "\n"
+       << "ADD R27, R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "MOV R39, " << seq << "\n"
+       << "CMP.LT R28, R26, R39\n"
+       << "MOV R39, " << dim << "\n"
+       << "CMP.LT R40, R27, R39\n"
+       << "MUL R28, R28, R40\n"
+       << "MOV R39, " << (seq - 1) << "\n"
+       << "MIN R29, R26, R39\n"
+       << "MOV R39, " << (dim - 1) << "\n"
+       << "MIN R30, R27, R39\n"
+       << "MOV R37, " << dim << "\n"
+       << "MUL R37, R29, R37\n"
+       << "ADD R37, R37, R30\n"
+       << "MUL R37, R37, 4\n"
+       << "ADD R37, R37, " << qBase << "\n"
+       << "LDG R42, [R37]\n"
+       << "MOV R39, 0\n"
+       << "SEL R" << dest << ", R28, R42, R39\n";
+  }
+
   static void emitAttentionKTransposeFragment(
       llvm::raw_ostream &os, int dest, int rowGroup, int colGroup,
       int64_t kBase, int64_t seq, int64_t dim) {
     os << "MOV R26, " << (rowGroup * 8) << "\n"
        << "ADD R26, R26, R24\n"
        << "MOV R27, " << (colGroup * 4) << "\n"
+       << "ADD R27, R27, R25\n"
+       << "MOV R39, " << dim << "\n"
+       << "CMP.LT R28, R26, R39\n"
+       << "MOV R39, " << seq << "\n"
+       << "CMP.LT R40, R27, R39\n"
+       << "MUL R28, R28, R40\n"
+       << "MOV R39, " << (dim - 1) << "\n"
+       << "MIN R29, R26, R39\n"
+       << "MOV R39, " << (seq - 1) << "\n"
+       << "MIN R30, R27, R39\n"
+       << "MOV R37, " << dim << "\n"
+       << "MUL R37, R30, R37\n"
+       << "ADD R37, R37, R29\n"
+       << "MUL R37, R37, 4\n"
+       << "ADD R37, R37, " << kBase << "\n"
+       << "LDG R42, [R37]\n"
+       << "MOV R39, 0\n"
+       << "SEL R" << dest << ", R28, R42, R39\n";
+  }
+
+  static void emitAttentionKTransposeFragmentTiled(
+      llvm::raw_ostream &os, int dest, int rowGroup, int colGroup,
+      int64_t kBase, int64_t seq, int64_t dim, int64_t rowOffset,
+      int64_t colOffset) {
+    os << "MOV R26, " << rowOffset << "\n"
+       << "ADD R26, R26, " << (rowGroup * 8) << "\n"
+       << "ADD R26, R26, R24\n"
+       << "MOV R27, " << colOffset << "\n"
+       << "ADD R27, R27, " << (colGroup * 4) << "\n"
        << "ADD R27, R27, R25\n"
        << "MOV R39, " << dim << "\n"
        << "CMP.LT R28, R26, R39\n"
