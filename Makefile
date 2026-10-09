@@ -7,7 +7,7 @@ SETUP_STAMP := $(VENV)/.make-setup
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup unit lit test pytest format precommit mgpu-opt cpp-sim cpp-sim-test benchmark-cpp-sim full-resnet18 full-resnet18-software full-resnet18-cpp full-resnet18-python clean clean-venv
+.PHONY: help setup unit lit test pytest format precommit mgpu-opt cpp-sim cpp-sim-test benchmark-cpp-sim full-resnet18 full-resnet18-software full-resnet18-cpp full-resnet18-python gpt2-software clean clean-venv
 
 help:
 	@printf "Targets:\n"
@@ -26,6 +26,7 @@ help:
 	@printf "  make full-resnet18-software  Alias for full-resnet18\n"
 	@printf "  make full-resnet18-cpp   Run full ResNet18 with mgpu C++ interpreter\n"
 	@printf "  make full-resnet18-python  Run full ResNet18 with Python simulator\n"
+	@printf "  make gpt2-software     Run full GPT-2 static forward with software ops\n"
 	@printf "  make clean        Remove generated caches/test artifacts\n"
 	@printf "  make clean-venv   Remove .venv\n"
 
@@ -85,6 +86,12 @@ full-resnet18-cpp: cpp-sim
 full-resnet18-python: setup
 	MGPU_FULL_RESNET18=1 \
 	  $(PY) -m unittest $(FULL_RESNET18_TEST) -v
+
+GPT2_SOFTWARE_TEST = tests.model_e2e.test_real_llm_decode.TestRealLLMDecode.test_full_gpt2_software_forward_matches_pytorch
+
+gpt2-software: cpp-sim
+	MGPU_RUN_GPT2_SOFTWARE=1 \
+	  $(PY) -m unittest $(GPT2_SOFTWARE_TEST) -v
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
